@@ -1,0 +1,12 @@
+beautifulsoup4
+fitz
+frontend
+google-cloud-texttospeech
+llm
+llm-cmd
+nltk
+openai
+sentence-transformers
+thefuzz
+transformers
+wget
