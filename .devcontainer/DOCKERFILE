@@ -1,0 +1,38 @@
+# Use an official Python runtime as a parent image
+FROM python:3.12-bullseye
+
+# Set the working directory
+WORKDIR /app
+
+# Install system packages
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    texlive-latex-base \
+    texlive-latex-extra \
+    texlive-fonts-extra \
+    texlive-science \
+    latex2html \
+    texlive-publishers \
+    apt-transport-https \
+    ca-certificates \
+    gnupg \
+    curl \
+    && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update && apt-get install -y google-cloud-cli
+
+# Copy the requirements file and install Python dependencies
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Download Spacy language model
+RUN python -m spacy download en_core_web_lg
+
+# Download NLTK data
+RUN python -c "import nltk; nltk.download('punkt')"
+
+# Copy the rest of your application code
+COPY . /app
+
+# Set default command to execute
+CMD ["python", "your_script.py"]
