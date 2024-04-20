@@ -11,7 +11,7 @@ import argparse
 
 def main(args):
 
-    files = glob.glob(os.path.join(f"{args.paperid}_files", "zipfile.zip"))
+    files = glob.glob(os.path.join(".temp", f"{args.paperid}_files", "zipfile.zip"))
     if files:
         zip_name = max(files, key=os.path.getmtime)
         # time_str = zip_name.split('-')[1].strip('.zip')

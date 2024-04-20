@@ -9,8 +9,14 @@ def generate_html(main_file, files_dir, html_parser, pdflatex, latex2html, latex
     prev_dir = os.getcwd()
     os.chdir(files_dir)
 
-    os.system(f'{pdflatex} -interaction=nonstopmode {main_file}.tex {display}')
-    os.system(f'{pdflatex} -interaction=nonstopmode {main_file}.tex {display}')
+    command_text = f"{pdflatex} -interaction=nonstopmode {main_file}.tex {display}"
+    print(command_text)
+    return_code = os.system(command_text)
+
+    if return_code != 0:
+        logging.warn(f"Non-zero return_code pdflatex. Return code: {return_code}")
+
+    return_code = os.system(command_text)
 
     if html_parser == 'latex2html':
         logging.info(f'Started processing with latex2html...')

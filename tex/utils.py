@@ -5,6 +5,8 @@ import wget
 from glob import glob
 import subprocess
 
+WORKING_DIRECTORY = "./.temp"
+
 
 def remove_oldfiles_samepaper(paper_id):
     if os.path.exists(paper_id):
@@ -16,9 +18,9 @@ def remove_oldfiles_samepaper(paper_id):
 
 
 def download_paper(paper_id):
-    file = wget.download(f"https://arxiv.org/e-print/{paper_id}")
-    files_dir = f'{paper_id}_files'
+    files_dir = os.path.join(WORKING_DIRECTORY, f"{paper_id}_files")
     os.makedirs(files_dir, exist_ok=True)
+    file = wget.download(f"https://arxiv.org/e-print/{paper_id}", out=files_dir)
 
     with tarfile.open(file) as tar:
         tar.extractall(files_dir)
@@ -116,6 +118,7 @@ def create_slides(slides, dir_path):
     # Iterate over the files to delete and remove them
     for file in files_to_delete:
         os.remove(os.path.join(dir_path, file))
+
 
 def create_questions(questions, dir_path):
 
