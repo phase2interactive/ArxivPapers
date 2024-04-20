@@ -4,19 +4,69 @@ import os
 import textwrap
 import shutil
 
+from openai import OpenAI, audio
 
-def text_to_speech_qa(questions, answers, mp3_list_file, files_dir, tts_client, ffmpeg, logging):
+
+# Abstract class to define TTS client behavior
+class TTSClient:
+    def synthesize_speech(self, text: str, voice: str, rate: float = 1.0, files_dir: str = None, file_name: str = None):
+        """Synthesize speech from text using a specific voice."""
+        raise NotImplementedError("Must implement synthesize_speech method.")
+
+
+class GoogleTTSClient(TTSClient):
+    def __init__(self):
+        self.client = texttospeech.TextToSpeechClient()
+
+    def synthesize_speech(self, text: str, voice: str, rate: float = 1.0, files_dir=None, file_name=None):
+        voice_params = texttospeech.VoiceSelectionParams(language_code="en-US", name=f"en-US-{voice}")
+        audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3, speaking_rate=rate)
+
+        try:
+            synthesis_input = texttospeech.SynthesisInput(text=text)
+            response = self.client.synthesize_speech(
+                input=synthesis_input, voice=voice_params, audio_config=audio_config
+            )
+            audio_content = response.audio_content
+
+            if files_dir and file_name:
+                file_path = os.path.join(files_dir, file_name)
+                with open(file_path, "wb") as out:
+                    out.write(audio_content)
+            else:
+                file_path = None
+
+            return audio_content, file_path
+        except Exception as e:
+            return None, None
+
+
+class OpenAITTSClient(TTSClient):
+    def __init__(self):
+        self.client = OpenAI()
+
+    def synthesize_speech(self, text, voice, rate=1.0, files_dir=None, file_name=None):
+        response = self.client.audio.speech.create(model="tts-1-hd", voice="onyx", input=text, speed=rate)
+
+        audio_content = b""
+        if files_dir and file_name:
+            file_path = os.path.join(files_dir, file_name)
+            with open(file_path, mode="wb") as f:
+                for data in response.iter_bytes():
+                    f.write(data)
+                    audio_content += data
+            return audio_content, file_path
+        else:
+            return None, None
+
+
+def text_to_speech_qa(questions, answers, mp3_list_file, files_dir, tts_client: TTSClient, ffmpeg, logging):
 
     for q, a in zip(questions, answers):
-        response = synthesize_speech(q, tts_client, 'Studio-O', 1.0)
+        chunk_audio_file_name = f"question_{hash(q)}.mp3"
+        audio_content, chunk_audio = tts_client.synthesize_speech(q, "Studio-O", 1.0, files_dir, chunk_audio_file_name)
 
-        logging.info(f'Processed question: \n\n {q}')
-
-        chunk_audio_file_name = f'question_{hash(q)}.mp3'
-        chunk_audio = os.path.join(files_dir, f'{chunk_audio_file_name}')
-
-        with open(chunk_audio, "wb") as out:
-            out.write(response.audio_content)
+        logging.info(f"Processed question: \n\n {q}")
 
         mp3_list_file.write(f'file {chunk_audio_file_name}\n')
 
@@ -28,13 +78,10 @@ def text_to_speech_qa(questions, answers, mp3_list_file, files_dir, tts_client, 
         a_sent = a.split('.')[:-1]
 
         for a_s in a_sent:
-            response = synthesize_speech(a_s, tts_client, 'Studio-Q', 1.0)
-
-            chunk_audio_file_name = f'answer_{hash(a_s)}.mp3'
-            chunk_audio = os.path.join(files_dir, f'{chunk_audio_file_name}')
-
-            with open(chunk_audio, "wb") as out:
-                out.write(response.audio_content)
+            chunk_audio_file_name = f"answer_{hash(a_s)}.mp3"
+            audio_content, file_path = tts_client.synthesize_speech(
+                a_s, "Studio-Q", 1.0, files_dir, chunk_audio_file_name
+            )
 
             mp3_list_file.write(f'file {chunk_audio_file_name}\n')
 
@@ -42,7 +89,7 @@ def text_to_speech_qa(questions, answers, mp3_list_file, files_dir, tts_client, 
         logging.info("-" * 100)
 
 
-def text_to_speech_short(text, slides, mp3_list_file, files_dir, tts_client, logging):
+def text_to_speech_short(text, slides, mp3_list_file, files_dir, tts_client: TTSClient, logging):
     para = text.split('\n\n')
     slides = slides['slides']
 
@@ -52,16 +99,11 @@ def text_to_speech_short(text, slides, mp3_list_file, files_dir, tts_client, log
         para.insert(0, first_para_sent[0])
 
     for s in para:
-        response = synthesize_speech(s, tts_client, 'Neural2-F', 1.0)
+        chunk_audio_file_name = f"short_{hash(s)}.mp3"
+        audio, chunk_audio = tts_client.synthesize_speech(s, "Neural2-F", 1.0, files_dir, chunk_audio_file_name)
 
         logging.info(f'Processed block text: \n\n {s}')
         logging.info("-" * 100)
-
-        chunk_audio_file_name = f'short_{hash(s)}.mp3'
-        chunk_audio = os.path.join(files_dir, f'{chunk_audio_file_name}')
-
-        with open(chunk_audio, "wb") as out:
-            out.write(response.audio_content)
 
         if os.path.getsize(chunk_audio) == 0:
             continue
@@ -69,19 +111,7 @@ def text_to_speech_short(text, slides, mp3_list_file, files_dir, tts_client, log
         mp3_list_file.write(f'file {chunk_audio_file_name}\n')
 
 
-def synthesize_speech(text, tts_client, voice, rate=1.0):
-    voice_params = texttospeech.VoiceSelectionParams(language_code="en-US", name=f"en-US-{voice}")
-    audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3, speaking_rate=rate)
-
-    try:
-        synthesis_input = texttospeech.SynthesisInput(text=text)
-        response = tts_client.synthesize_speech(input=synthesis_input, voice=voice_params, audio_config=audio_config)
-        return response
-    except Exception as e:
-        return None
-
-
-def text_to_speechvideo(text, mp3_list_file, files_dir, tts_client, pageblockmap, voice, logging):
+def text_to_speechvideo(text, mp3_list_file, files_dir, tts_client: TTSClient, pageblockmap, voice, logging):
     splits = sent_tokenize(text)
 
     assert len(pageblockmap) == len(splits), "Number of pageblockmap does not match number of splits"
@@ -98,32 +128,35 @@ def text_to_speechvideo(text, mp3_list_file, files_dir, tts_client, pageblockmap
         joinedtext = ' '.join(block_text)
         if isinstance(prev, list):
             last_page = prev[1]
-            synthesize(joinedtext, tts_client, files_dir, mp3_list_file,
-                       page=prev[1], block=prev[2], voice=voice, logging=logging)
+            synthesize(
+                joinedtext,
+                tts_client,
+                files_dir,
+                mp3_list_file,
+                page=prev[1],
+                block=prev[2],
+                voice=voice,
+                logging=logging,
+            )
         else:
-            synthesize(joinedtext, tts_client, files_dir, mp3_list_file,
-                       page=last_page, voice=voice, logging=logging)
+            synthesize(joinedtext, tts_client, files_dir, mp3_list_file, page=last_page, voice=voice, logging=logging)
 
         prev = m
         block_text = [splits[ind]]
 
 
-def synthesize(text, tts_client, files_dir, mp3_list_file, page=None, block=None, voice=None, logging=None):
-    response = synthesize_speech(text, tts_client, voice)
+def synthesize(text, tts_client: TTSClient, files_dir, mp3_list_file, page=None, block=None, voice=None, logging=None):
+    if block is None:
+        chunk_audio_file_name = f"page{page}summary_{hash(text)}.mp3"
+    else:
+        chunk_audio_file_name = f"page{page}block{block}_{hash(text)}.mp3"
+
+    audio, _ = tts_client.synthesize_speech(text, voice, 1.0, files_dir, chunk_audio_file_name)
 
     # if processing fails, subdivide into smaller chunks and try again
-    if response:
+    if audio:
         logging.info(f'Processed block text: \n\n {text}')
         logging.info("-" * 100)
-
-        if block is None:
-            chunk_audio_file_name = f'page{page}summary_{hash(text)}.mp3'
-        else:
-            chunk_audio_file_name = f'page{page}block{block}_{hash(text)}.mp3'
-
-        chunk_audio = os.path.join(files_dir, f'{chunk_audio_file_name}')
-        with open(chunk_audio, "wb") as out:
-            out.write(response.audio_content)
 
         mp3_list_file.write(f'file {chunk_audio_file_name}\n')
     else:
@@ -139,7 +172,7 @@ def synthesize(text, tts_client, files_dir, mp3_list_file, page=None, block=None
         synthesize(chunks[1], tts_client, files_dir, mp3_list_file, page, block, voice, logging)
 
 
-def text_to_speech(text, mp3_list_file, files_dir, tts_client, voice, logging):
+def text_to_speech(text, mp3_list_file, files_dir, tts_client: TTSClient, voice, logging):
     splits = sent_tokenize(text)
 
     block = []
@@ -151,16 +184,11 @@ def text_to_speech(text, mp3_list_file, files_dir, tts_client, voice, logging):
             continue
 
         block_text = ' '.join(block)
-        response = synthesize_speech(block_text, tts_client, voice)
+        chunk_audio_file_name = f"part_{hash(block_text)}.mp3"
+        _, _ = tts_client.synthesize_speech(block_text, voice, 1.0, files_dir, chunk_audio_file_name)
 
         logging.info(f'Processed text: \n\n {block_text}')
         logging.info("-" * 100)
 
-        chunk_audio_file_name = f'part_{hash(block_text)}.mp3'
-        chunk_audio = os.path.join(files_dir, f'{chunk_audio_file_name}')
-
-        with open(chunk_audio, "wb") as out:
-            out.write(response.audio_content)
-
-        mp3_list_file.write(f'file {chunk_audio_file_name}\n')
+        mp3_list_file.write(f"file {chunk_audio_file_name}\n")
         block = []

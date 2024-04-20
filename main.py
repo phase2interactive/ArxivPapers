@@ -201,7 +201,11 @@ def main(args):
     #                                                   SPEECH
     # ==============================================================================================================
 
-    tts_client = texttospeech.TextToSpeechClient()
+    if args.tts_client == "openai":
+        tts_client = OpenAITTSClient()
+    else:
+        tts_client = GoogleTTSClient()
+
     if args.gdrive_id:
         gdrive_client = GDrive(args.gdrive_id)
 
@@ -273,12 +277,21 @@ def main(args):
     crop_pdf(f"{files_dir}/{main_file}.pdf",f"{files_dir}/fpage.pdf", args.gs,
              upper_top=3, top_percent=25, left_percent=12, right_percent=7)
 
-    zip_files(files_dir, args.gs, args.ffmpeg,
-              args.create_short, args.create_video, args.final_audio_file,
-              args.chunk_mp3_file_list, display)
+    zip_files(
+        files_dir,
+        args.gs,
+        args.ffmpeg,
+        args.create_short,
+        args.create_qa,
+        args.create_video,
+        args.final_audio_file,
+        args.chunk_mp3_file_list,
+        display,
+    )
 
 
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser(description='Arguments')
 
     parser.add_argument("--paperid", type=str, default='', help='ArXiv paper id, e.g., 1706.03762')
@@ -302,7 +315,12 @@ if __name__ == "__main__":
     parser.add_argument("--create_short", action="store_true", help="create short video")
     parser.add_argument("--create_qa", action="store_true", help="create qa video")
     parser.add_argument("--create_audio_simple", action="store_true", help="create audio")
-    parser.add_argument("--openai_key", type=str, default="", help='openai key to call GPT API')
+    parser.add_argument(
+        "--tts_client", type=str, choices=["google", "openai"], default="google", help="text-to-speech client"
+    )
+    parser.add_argument(
+        "--openai_key", type=str, default=os.environ.get("OPENAI_API_KEY", ""), help="openai key to call GPT API"
+    )
     parser.add_argument("--llm_strong", type=str, default="gpt-4-0125-preview", help='llm model for complex tasks')
     parser.add_argument("--llm_base", type=str, default="gpt-3.5-turbo-0125", help='llm model for basic tasks')
 
