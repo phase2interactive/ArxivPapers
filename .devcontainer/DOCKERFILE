@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y \
     && apt-get update && apt-get install -y google-cloud-cli
 
 # Copy the requirements file and install Python dependencies
-COPY requirements.txt /app/
+COPY ../requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Download Spacy language model
@@ -31,8 +31,4 @@ RUN python -m spacy download en_core_web_lg
 # Download NLTK data
 RUN python -c "import nltk; nltk.download('punkt')"
 
-# Copy the rest of your application code
-COPY . /app
 
-# Set default command to execute
-CMD ["python", "your_script.py"]
