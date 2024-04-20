@@ -1,5 +1,4 @@
 beautifulsoup4
-fitz
 frontend
 google-cloud-texttospeech
 llm
@@ -10,3 +9,9 @@ sentence-transformers
 thefuzz
 transformers
 wget
+PyPDF2
+tools
+spacy
+tiktoken
+pyperclip 
+PyDrive2
