@@ -1,8 +1,6 @@
 # Use an official Python runtime as a parent image
 FROM python:3.12-bullseye
 
-# Set the working directory
-WORKDIR /app
 
 # Install system packages
 RUN apt-get update && apt-get install -y \
@@ -22,13 +20,13 @@ RUN apt-get update && apt-get install -y \
     && apt-get update && apt-get install -y google-cloud-cli
 
 # Copy the requirements file and install Python dependencies
-COPY ../requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+#COPY ../requirements.txt requirements.txt
+#RUN pip install --no-cache-dir -r requirements.txt
 
 # Download Spacy language model
-RUN python -m spacy download en_core_web_lg
+#RUN python -m spacy download en_core_web_lg
 
 # Download NLTK data
-RUN python -c "import nltk; nltk.download('punkt')"
+#RUN python -c "import nltk; nltk.download('punkt')"
 
 
