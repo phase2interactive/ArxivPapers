@@ -15,6 +15,7 @@ import pstats
 from datetime import datetime
 import logging
 from typing import Any
+from collections import defaultdict
 
 
 logging.basicConfig(level=logging.INFO, format="\n%(asctime)s - %(levelname)s - %(message)s")
@@ -231,28 +232,24 @@ def main(args):
         lines = f.readlines()
 
     # filter lines to only include those that have "page4" in them
-    lines = [line for line in lines if "page0" in line]
+    # lines = [line for line in lines if "page0" in line]
     print(lines)
 
-    # output each page of the pdf this is used by downstream functions
-    # TODO: group lines by page
+    # Group lines by page number
+    pages = defaultdict(list)
     for line in lines:
         line = line.strip()
-
-        # Split the line into components
         components = line.split()
-
-        # The filename is the second component
-        audio = components[1].replace(".mp3", "")
-        video = audio.replace("-", "")
-
-        # The number is the fourth component (without the #)
         match = re.search(r"page(\d+)", components[1])
         page_num = int(match.group(1))
+        pages[page_num].append(line)
+
+    # output each page of the pdf this is used by downstream functions
+    for page_num, _ in pages.items():
         page_num_filename_no_ext = os.path.join(dr, str(page_num))
         page_num_pdf = f"{page_num_filename_no_ext}.pdf"
-
         logfile_path = os.path.join(dr, "logs", f"pdf.log")
+
         with CommandRunner(logfile_path, args) as run:
             run.extract_page_as_pdf(os.path.join(dr, "main.pdf"), page_num + 1, page_num_pdf)
 
