@@ -16,6 +16,7 @@ from datetime import datetime
 import logging
 from typing import Any
 
+
 logging.basicConfig(level=logging.INFO, format="\n%(asctime)s - %(levelname)s - %(message)s")
 
 
@@ -32,11 +33,24 @@ class CommandRunner:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.logfile.close()
 
-    def pdf_to_png(self, pdf_file, png_file) -> subprocess.CompletedProcess[bytes]:
+    def pdf_to_png(self, pdf_file, png_file, r="-r500") -> subprocess.CompletedProcess[bytes]:
         return self.run(
-            f"{self.args.gs} -sDEVICE=png16m -r500 -o {png_file} {pdf_file}",
+            f"{self.args.gs} -sDEVICE=png16m {r} -o {png_file} {pdf_file}",
             shell=True,
         )
+
+    def extract_page_as_pdf(self, pdf_file, page_num, output_file) -> subprocess.CompletedProcess[bytes]:
+        command = [
+            self.args.gs,
+            "-sDEVICE=pdfwrite",
+            "-dNOPAUSE",
+            "-dBATCH",
+            f"-dFirstPage={page_num}",
+            f"-dLastPage={page_num}",
+            f"-sOutputFile={output_file}",
+            pdf_file,
+        ]
+        return self.run(command)
 
     def create_video_from_image_and_audio(
         self, png_file, mp3_file, resolution, video_file
@@ -56,7 +70,7 @@ class CommandRunner:
         else:
             ret_val = subprocess.run(command, stdout=self.logfile, stderr=self.logfile, check=check, **kwargs)
         if ret_val.returncode != 0:
-            logging.error(f"\t >> Non-zero return code running command: {' '.join(command)}")
+            logging.error(f"\t >> Non-zero return code running command: {cmd_text}")
             logging.error(f"\t >> Return code: {ret_val.returncode}")
         else:
             logging.info(f"\t >> Command {cmd_text} ran successfully")
@@ -78,41 +92,24 @@ def process_line(i, line, dr, args) -> tuple[Any | int, str]:
     audio = components[1].replace(".mp3", "")
     video = audio.replace("-", "")
 
+    video_file = f"{os.path.join(dr, video)}.mp4"
+    final_video_file = f"{os.path.join(dr, video)}_final.mp4"
+
+    # if final_video_file exists
+    if os.path.exists(final_video_file):
+        return i, final_video_file
+
     # The number is the fourth component (without the #)
     match = re.search(r"page(\d+)", components[1])
     page_num = int(match.group(1))
     page_num_filename_no_ext = os.path.join(dr, str(page_num))
     page_num_png = f"{page_num_filename_no_ext}_{i}.png"
-    page_num_pdf = f"{page_num_filename_no_ext}_{i}.pdf"
+    page_num_pdf = f"{page_num_filename_no_ext}.pdf"
 
     logfile_path = os.path.join(dr, "logs", f"{i}{video}.log")
     with CommandRunner(logfile_path, args) as run:
-
-        # extract first page of PDF
-        run(
-            command=[
-                args.gs,
-                "-sDEVICE=pdfwrite",
-                "-dNOPAUSE",
-                "-dBATCH",
-                f"-dFirstPage={page_num+1}",
-                f"-dLastPage={page_num+1}",
-                f"-sOutputFile={page_num_pdf}",
-                os.path.join(dr, "main.pdf"),
-            ]
-        )
-
         # convert to PNG
-        run(
-            [
-                args.gs,
-                "-sDEVICE=png16m",
-                "-r300",
-                "-o",
-                page_num_png,
-                page_num_pdf,
-            ]
-        )
+        run.pdf_to_png(page_num_pdf, page_num_png, "-r300")
 
         if "summary" not in components[1]:
             doc = fitz.open(page_num_pdf)
@@ -184,23 +181,19 @@ def process_line(i, line, dr, args) -> tuple[Any | int, str]:
             # Save the combined image to a file
             image.save(page_num_png)
 
-        video_file = f"{os.path.join(dr, video)}.mp4"
-        final_video_file = f"{os.path.join(dr, video)}_final.mp4"
         # process each image-audio pair to create video chunk
-        resolution = "scale=1920:-2"
 
         run.create_video_from_image_and_audio(
             png_file=page_num_png,
             mp3_file=f"{os.path.join(dr, audio)}.mp3",
-            resolution=resolution,
+            resolution="scale=1920:-2",
             video_file=video_file,
         )
 
-        mp3_path = os.path.join(dr, audio) + ".mp3"
-        # # Get audio duration
-
+        # Get audio duration
         result = run(
             f"{args.ffprobe} -i {os.path.join(dr, audio)}.mp3 -show_entries format=duration -v quiet -of csv=p=0",
+            check=False,
             capture_output=True,
             text=True,
             shell=True,
@@ -212,15 +205,6 @@ def process_line(i, line, dr, args) -> tuple[Any | int, str]:
 
         # # ensure that there is no silence at the end of the video, and video len is the same as audio len
         run([args.ffmpeg, "-i", video_file, "-t", str(audio_duration), "-y", "-c", "copy", final_video_file])
-
-        # exit_code = os.system(
-        #     f"audio_duration=$({args.ffprobe} -i {os.path.join(dr, audio)}.mp3 "
-        #     f'-show_entries format=duration -v quiet -of csv="p=0"); '
-        #     f"audio_duration=$((${{audio_duration%.*}} + 1)); "
-        #     f"echo !!!!Audio duration: $audio_duration; "
-        #     f"{args.ffmpeg} -i {os.path.join(dr, video)}.mp4 -t $audio_duration "
-        #     f"-y -c copy {final_video_file}"
-        # )
 
         return i, final_video_file
 
@@ -237,23 +221,45 @@ def main(args):
     else:
         return
 
-    if os.path.exists(dr):
-        shutil.rmtree(dr)
+    # if os.path.exists(dr):
+    #     shutil.rmtree(dr)
 
-    with zipfile.ZipFile(zip_name, "r") as zipf:
-        zipf.extractall(dr)
+    # with zipfile.ZipFile(zip_name, "r") as zipf:
+    #     zipf.extractall(dr)
 
     with open(os.path.join(dr, "mp3_list.txt"), "r") as f:
         lines = f.readlines()
 
     # filter lines to only include those that have "page4" in them
-    lines = [line for line in lines if "page4" in line]
+    lines = [line for line in lines if "page0" in line]
     print(lines)
+
+    # output each page of the pdf this is used by downstream functions
+    # TODO: group lines by page
+    for line in lines:
+        line = line.strip()
+
+        # Split the line into components
+        components = line.split()
+
+        # The filename is the second component
+        audio = components[1].replace(".mp3", "")
+        video = audio.replace("-", "")
+
+        # The number is the fourth component (without the #)
+        match = re.search(r"page(\d+)", components[1])
+        page_num = int(match.group(1))
+        page_num_filename_no_ext = os.path.join(dr, str(page_num))
+        page_num_pdf = f"{page_num_filename_no_ext}.pdf"
+
+        logfile_path = os.path.join(dr, "logs", f"pdf.log")
+        with CommandRunner(logfile_path, args) as run:
+            run.extract_page_as_pdf(os.path.join(dr, "main.pdf"), page_num + 1, page_num_pdf)
 
     block_coords = pickle.load(open(os.path.join(dr, "block_coords.pkl"), "rb"))
     gptpagemap = pickle.load(open(os.path.join(dr, "gptpagemap.pkl"), "rb"))
 
-    num_workers = min(len(lines), os.cpu_count() or 4)
+    num_workers = 4  # min(len(lines), os.cpu_count() or 4)
 
     with Pool(num_workers) as pool:
         results = pool.starmap(process_line, [(i, line, dr, args) for i, line in enumerate(lines)])
@@ -346,7 +352,6 @@ def process_short_line(i, line, page_num, dr, args):
 
     logfile_path = os.path.join(dr, "logs", f"{i}{video}.log")
     with CommandRunner(logfile_path, args) as run:
-        # os.system(f"{args.gs} -sDEVICE=png16m -r500 -o {os.path.join(dr, str(page_num))}.png {input_path}.pdf")
         run.pdf_to_png(f"{input_path}.pdf", f"{os.path.join(dr, str(page_num))}.png")
 
         run.create_video_from_image_and_audio(
@@ -357,23 +362,20 @@ def process_short_line(i, line, page_num, dr, args):
         )
 
         # ensure that there is no silence at the end of the video, and video len is the same as audio len
-        audio_duration_process = run(
-            [
-                args.ffprobe,
-                "-i",
-                os.path.join(dr, audio) + ".mp3",
-                "-show_entries",
-                "format=duration",
-                "-v",
-                "quiet",
-                "-of",
-                'csv="p=0"',
-            ],
+        result = run(
+            f"{args.ffprobe} -i {os.path.join(dr, audio)}.mp3 -show_entries format=duration -v quiet -of csv='p=0'",
+            check=False,
             capture_output=True,
             text=True,
+            shell=True,
         )
-        audio_duration = int(float(audio_duration_process.stdout.strip())) + 1
 
+        # get the audio duration
+        audio_duration = int(float(result.stdout.strip())) + 1 if result.stdout.strip() else 0
+        if audio_duration == 0:
+            logging.warning(f"Audio duration is 0 for {audio}.mp3")
+
+        # ensure that there is no silence at the end of the video, and video len is the same as audio len
         run([args.ffmpeg, "-i", i_mp4, "-t", str(audio_duration), "-y", "-c", "copy", i_final_mp4])
 
         return i, i_final_mp4
