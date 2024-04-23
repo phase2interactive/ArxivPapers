@@ -41,6 +41,9 @@ class CommandRunner:
         )
 
     def extract_page_as_pdf(self, pdf_file, page_num, output_file) -> subprocess.CompletedProcess[bytes]:
+        """
+        gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={page_num} -dLastPage={page_num}-sOutputFile={output_file} {pdf_file},
+        """
         command = [
             self.args.gs,
             "-sDEVICE=pdfwrite",
@@ -200,11 +203,10 @@ def process_line(i, line, dr, args) -> tuple[Any | int, str]:
             shell=True,
         )
         audio_duration = int(float(result.stdout.strip())) + 1 if result.stdout.strip() else 0
-        # print(f"!!!! audio_duration = {audio_duration}")
         if audio_duration == 0:
             logging.warning(f"Audio duration is 0 for {audio}.mp3")
 
-        # # ensure that there is no silence at the end of the video, and video len is the same as audio len
+        # ensure that there is no silence at the end of the video, and video len is the same as audio len
         run([args.ffmpeg, "-i", video_file, "-t", str(audio_duration), "-y", "-c", "copy", final_video_file])
 
         return i, final_video_file
@@ -218,15 +220,26 @@ def main(args):
 
     if files:
         zip_name = max(files, key=os.path.getmtime)
-        dr = os.path.join(f"{args.paperid}_files", "output")
+        dr = os.path.join(".temp", f"{args.paperid}_files", "output")
     else:
         return
 
-    # if os.path.exists(dr):
-    #     shutil.rmtree(dr)
+    if os.path.exists(dr):
+        shutil.rmtree(dr)
 
-    # with zipfile.ZipFile(zip_name, "r") as zipf:
-    #     zipf.extractall(dr)
+    with zipfile.ZipFile(zip_name, "r") as zipf:
+        zipf.extractall(dr)
+
+    mp4_main_list = os.path.join(dr, "mp4_list.txt")
+    mp4_main_output = os.path.join(dr, "output.mp4")
+
+    short_mp3s = os.path.join(dr, "shorts_mp3_list.txt")
+    mp4_short_list = os.path.join(dr, "short_mp4_list.txt")
+    mp4_short_output = os.path.join(dr, "output_short.mp4")
+
+    qa_mp3_list = os.path.join(dr, "qa_mp3_list.txt")
+    mp4_qa_list = os.path.join(dr, "qa_mp4_list.txt")
+    mp4_qa_output = os.path.join(dr, "output_qa.mp4")
 
     with open(os.path.join(dr, "mp3_list.txt"), "r") as f:
         lines = f.readlines()
@@ -256,30 +269,25 @@ def main(args):
     block_coords = pickle.load(open(os.path.join(dr, "block_coords.pkl"), "rb"))
     gptpagemap = pickle.load(open(os.path.join(dr, "gptpagemap.pkl"), "rb"))
 
-    num_workers = 4  # min(len(lines), os.cpu_count() or 4)
+    # with Pool(args.num_workers) as pool:
+    #     results = pool.starmap(process_line, [(i, line, dr, args) for i, line in enumerate(lines)])
 
-    with Pool(num_workers) as pool:
-        results = pool.starmap(process_line, [(i, line, dr, args) for i, line in enumerate(lines)])
-
-    results.sort(key=lambda x: x[0])
-    with open(os.path.join(dr, "mp4_list.txt"), "w") as outvideo:
-        outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file in results])
+    # results.sort(key=lambda x: x[0])
+    # with open(os.path.join(dr, "mp4_list.txt"), "w") as outvideo:
+    #     outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file in results])
 
     # =============== SHORT VIDEO ====================
-    short_mp3s = os.path.join(dr, "shorts_mp3_list.txt")
 
-    if os.path.exists(short_mp3s):
+    if False:  # os.path.exists(short_mp3s):
         with open(short_mp3s, "r") as f:
             lines = f.readlines()
 
-        with Pool(num_workers) as pool:
+        with Pool(args.num_workers) as pool:
             results = pool.starmap(
                 process_short_line, [(page_num, line, page_num, dr, args) for (page_num, line) in enumerate(lines)]
             )
 
         results.sort(key=lambda x: x[0])
-        mp4_short_list = os.path.join(dr, "short_mp4_list.txt")
-        mp4_short_output = os.path.join(dr, "output_short.mp4")
 
         print(mp4_short_output)
         with open(mp4_short_list, "w") as outvideo:
@@ -287,41 +295,42 @@ def main(args):
 
     # =============== QA VIDEO ====================
 
-    # if os.path.exists(os.path.join(dr, "qa_mp3_list.txt")):
-    #     with open(os.path.join(dr, "qa_mp3_list.txt"), "r") as f:
-    #         lines = f.readlines()
+    if os.path.exists(qa_mp3_list):
+        with open(qa_mp3_list, "r") as f:
+            lines = f.readlines()
 
-    #     qa_pages = pickle.load(open(os.path.join(dr, "qa_pages.pkl"), "rb"))
+        # lines = [lines[0], lines[1]]
+        print(lines)
 
-    #     pool = Pool()
-    #     results = pool.starmap(
-    #         process_qa_line, [(i, line, line_num, qa_pages, dr, args) for i, (line_num, line) in enumerate(lines)]
-    #     )
-    #     pool.close()
-    #     pool.join()
+        qa_pages = pickle.load(open(os.path.join(dr, "qa_pages.pkl"), "rb"))
+        tasks = prepare_tasks(dr, lines, qa_pages)
+        print(tasks)
 
-    #     results.sort(key=lambda x: x[0])
-    #     with open(os.path.join(dr, "qa_mp4_list.txt"), "w") as outvideo:
-    #         outvideo.writelines([r for _, r in results])
+        with Pool(args.num_workers) as pool:
+            results = pool.starmap(process_qa_line, tasks)
 
-    #     os.system(
-    #         f'{args.ffmpeg} -f concat -i {os.path.join(dr, "qa_mp4_list.txt")} '
-    #         f'-y -c copy {os.path.join(dr, "output_qa.mp4")}'
-    #     )
+        results.sort(key=lambda x: x[0])
+        with open(os.path.join(dr, "qa_mp4_list.txt"), "w") as outvideo:
+            outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file in results])
 
-    commands = [
-        f'{args.ffmpeg} -f concat -i {os.path.join(dr, "mp4_list.txt")} -y -c copy {os.path.join(dr, "output.mp4")}'
-    ]
+    commands = []
 
-    if os.path.exists(short_mp3s):
+    if os.path.exists(mp4_main_list):
+        commands.append(f"{args.ffmpeg} -f concat -i {mp4_main_list} -y -c copy {mp4_main_output}")
+
+    if os.path.exists(mp4_short_list):
         commands.append(f"{args.ffmpeg} -f concat -i {mp4_short_list} -y -c copy {mp4_short_output}")
 
+    if os.path.exists(mp4_qa_list):
+        commands.append(f"{args.ffmpeg} -f concat -i {mp4_qa_list} " f"-y -c copy {mp4_qa_output}")
+
+    print(commands)
     with Pool(len(commands)) as p:
         p.map(os.system, commands)
 
 
 def process_short_line(i, line, page_num, dr, args):
-    print([i, line, page_num, dr, args])
+    print(i, line, page_num)
 
     # Remove the newline character at the end of the line
     line = line.strip()
@@ -337,9 +346,9 @@ def process_short_line(i, line, page_num, dr, args):
 
     i_mp4 = f"{os.path.join(dr, video)}_{i}.mp4"
     i_final_mp4 = f"{os.path.join(dr, video)}{i}_final.mp4"
-    # if i_final_mp4 exists
-    # if os.path.exists(i_final_mp4):
-    # return i, f"file {os.path.basename(i_final_mp4)}\n"
+
+    if os.path.exists(i_final_mp4):
+        return i, i_final_mp4
 
     # convert to PNG
     if page_num == 0:
@@ -378,7 +387,38 @@ def process_short_line(i, line, page_num, dr, args):
         return i, i_final_mp4
 
 
-def process_qa_line(i, line, line_num, qa_pages, dr, args):
+def prepare_tasks(dr, lines, qa_pages):
+    tasks = []
+    turn = -1
+    page_num = 0
+
+    for line_num, line in enumerate(lines):
+        components = line.strip().split()
+        audio = components[1].replace(".mp3", "")
+
+        if "question" in audio:
+            turn += 1
+            page_num = 0
+            input_path = os.path.join(dr, "questions", f"question_{turn}")
+        else:
+            if turn < len(qa_pages) and page_num < len(qa_pages[turn]):
+                p_num = qa_pages[turn][page_num]
+                input_path = os.path.join(dr, str(p_num))
+                os.system(
+                    f'{args.gs} -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={p_num+1} -dLastPage={p_num+1} -sOutputFile={input_path} {os.path.join(dr, "main.pdf")} > /dev/null 2>&1'
+                )
+                page_num += 1
+            else:
+                continue  # Skip to the next iteration if indices are out of range
+
+        tasks.append((line, line_num, f"{input_path}.pdf", dr, args))
+    return tasks
+
+
+def process_qa_line(line, line_num, input_path, dr, args) -> tuple[Any, str]:
+
+    print("process_qa_line", line, line_num, input_path)
+
     # Remove the newline character at the end of the line
     line = line.strip()
 
@@ -389,84 +429,39 @@ def process_qa_line(i, line, line_num, qa_pages, dr, args):
     audio = components[1].replace(".mp3", "")
     video = audio.replace("-", "")
 
-    # convert to PNG
-    if "question" in audio:  # question - get created slide
-        turn = line_num // 2
-        page_num = 0
-        input_path = os.path.join(dr, "questions", f"question_{turn}")
-    else:  # answer - get single page from paper
-        turn = (line_num - 1) // 2
-        p_num = qa_pages[turn][page_num]
-        # extract the page from PDF
-        os.system(
-            f'{args.gs} -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={p_num+1} -dLastPage={p_num+1} -sOutputFile={os.path.join(dr, str(p_num))}.pdf {os.path.join(dr, "main.pdf")} > /dev/null 2>&1'
+    qa_page = os.path.join(dr, f"qa_page_{line_num}.png")
+    video_file = f"{os.path.join(dr, video)}.mp4"
+    video_file_final = f"{os.path.join(dr, video)}_final.mp4"
+
+    if os.path.exists(video_file_final):
+        return line_num, video_file_final
+
+    logfile_path = os.path.join(dr, "logs", f"{video}.log")
+    with CommandRunner(logfile_path, args) as run:
+
+        run.pdf_to_png(input_path, qa_page, "-r500")
+        run.create_video_from_image_and_audio(
+            png_file=qa_page,
+            mp3_file=f"{os.path.join(dr, audio)}.mp3",
+            resolution="scale=1920:-2",
+            video_file=video_file,
         )
-        input_path = os.path.join(dr, f"{p_num}")
 
-    qa_page = f"qa_page_{line_num}.png"
-    subprocess.run(
-        [args.gs, "-sDEVICE=png16m", "-r500", "-o", os.path.join(dr, qa_page), f"{input_path}.pdf"], check=True
-    )
+        # ensure that there is no silence at the end of the video, and video len is the same as audio len
+        result = run(
+            f"{args.ffprobe} -i {os.path.join(dr, audio)}.mp3 -show_entries format=duration -v quiet -of csv=p=0",
+            check=False,
+            capture_output=True,
+            text=True,
+            shell=True,
+        )
+        audio_duration = int(float(result.stdout.strip())) + 1 if result.stdout.strip() else 0
+        if audio_duration == 0:
+            logging.warning(f"Audio duration is 0 for {audio}.mp3")
 
-    resolution = "scale=1920:-2"
-    subprocess.run(
-        [
-            args.ffmpeg,
-            "-loop",
-            "1",
-            "-i",
-            os.path.join(dr, qa_page),
-            "-i",
-            os.path.join(dr, audio) + ".mp3",
-            "-vf",
-            resolution,
-            "-c:v",
-            "libx264",
-            "-tune",
-            "stillimage",
-            "-y",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-pix_fmt",
-            "yuv420p",
-            "-shortest",
-            os.path.join(dr, video) + ".mp4",
-        ],
-        check=True,
-    )
+        run([args.ffmpeg, "-i", video_file, "-t", str(audio_duration), "-y", "-c", "copy", video_file_final])
 
-    # ensure that there is no silence at the end of the video, and video len is the same as audio len
-    audio_duration_command = [
-        args.ffprobe,
-        "-i",
-        os.path.join(dr, audio) + ".mp3",
-        "-show_entries",
-        "format=duration",
-        "-v",
-        "quiet",
-        "-of",
-        'csv="p=0"',
-    ]
-    audio_duration = subprocess.run(audio_duration_command, stdout=subprocess.PIPE, check=True).stdout.decode().strip()
-    audio_duration = str(int(float(audio_duration)) + 1)
-    subprocess.run(
-        [
-            args.ffmpeg,
-            "-i",
-            os.path.join(dr, video) + ".mp4",
-            "-t",
-            audio_duration,
-            "-y",
-            "-c",
-            "copy",
-            os.path.join(dr, video) + "_final.mp4",
-        ],
-        check=True,
-    )
-
-    return i, f"file '{video}_final.mp4'\n"
+    return line_num, video_file_final
 
 
 if __name__ == "__main__":
@@ -475,8 +470,15 @@ if __name__ == "__main__":
     parser.add_argument("--ffmpeg", type=str, default="ffmpeg")
     parser.add_argument("--ffprobe", type=str, default="ffprobe")
     parser.add_argument("--gs", type=str, default="gs")
+    parser.add_argument("--num_workers", type=int, default="1")
 
     args = parser.parse_args()
-    args = argparse.Namespace(paperid="2310.02304", gs="gs", ffmpeg="ffmpeg", ffprobe="ffprobe")
+    args = argparse.Namespace(
+        paperid="1910.13461",
+        gs="gs",
+        ffmpeg="ffmpeg",
+        ffprobe="ffprobe",
+        num_workers=os.cpu_count(),
+    )
 
     main(args)
