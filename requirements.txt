@@ -18,3 +18,4 @@ PyDrive2
 PyMuPDF
 ffprobe-python
 ffmpeg-python
+fastapi

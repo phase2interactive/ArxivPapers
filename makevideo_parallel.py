@@ -1,3 +1,4 @@
+from math import e
 import os
 from platform import system
 import zipfile
@@ -41,7 +42,7 @@ class CommandRunner:
             shell=True,
         )
 
-    def extract_video_segment(self, audio_file, video_file, video_file_final) -> tuple[bytes, bytes]:
+    def extract_video_segment(self, audio_file, video_file, video_file_final):
         metadata = FFProbe(audio_file)
         audio_duration = int(metadata.streams[0].duration_seconds()) + 1
         out, error = (
@@ -54,6 +55,7 @@ class CommandRunner:
 
         # Optionally also handle stderr
         self.logfile.write("\nErrors:\n" + error.decode("utf-8"))
+        return out, error
 
     def extract_page_as_pdf(self, pdf_file, page_num, output_file) -> subprocess.CompletedProcess[bytes]:
         """
@@ -110,124 +112,129 @@ class CommandRunner:
         logging.info(f"\t >> Return code: {ret_val.returncode}")
         return ret_val
 
-    def __call__(self, command, check=True, **kwargs):
+    def __call__(self, command, check=True, **kwargs) -> subprocess.CompletedProcess[bytes]:
         return self.run(command, check, **kwargs)
 
 
-def process_line(i, line, dr, args) -> tuple[Any | int, str]:
-    print([i, line])
-    # Remove the newline character at the end of the line
-    line = line.strip()
+def process_line(i, line, dr, args, block_coords, gptpagemap) -> tuple[int, str, Exception]:
+    try:
+        print([i, line])
+        # Remove the newline character at the end of the line
+        line = line.strip()
 
-    # Split the line into components
-    components = line.split()
+        # Split the line into components
+        components = line.split()
 
-    # The filename is the second component
-    audio = components[1].replace(".mp3", "")
-    video = audio.replace("-", "")
+        # The filename is the second component
+        audio = components[1].replace(".mp3", "")
+        video = audio.replace("-", "")
 
-    video_file = f"{os.path.join(dr, video)}.mp4"
-    final_video_file = f"{os.path.join(dr, video)}_final.mp4"
+        video_file = f"{os.path.join(dr, video)}.mp4"
+        final_video_file = f"{os.path.join(dr, video)}_final.mp4"
 
-    # if final_video_file exists
-    if os.path.exists(final_video_file):
-        return i, final_video_file
+        # if final_video_file exists
+        if os.path.exists(final_video_file):
+            return i, final_video_file, None
 
-    # The number is the fourth component (without the #)
-    match = re.search(r"page(\d+)", components[1])
-    page_num = int(match.group(1))
-    page_num_filename_no_ext = os.path.join(dr, str(page_num))
-    page_num_png = f"{page_num_filename_no_ext}_{i}.png"
-    page_num_pdf = f"{page_num_filename_no_ext}.pdf"
+        # The number is the fourth component (without the #)
+        match = re.search(r"page(\d+)", components[1])
+        page_num = int(match.group(1))
+        page_num_filename_no_ext = os.path.join(dr, str(page_num))
+        page_num_png = f"{page_num_filename_no_ext}_{i}.png"
+        page_num_pdf = f"{page_num_filename_no_ext}.pdf"
 
-    logfile_path = os.path.join(dr, "logs", f"{i}{video}.log")
-    with CommandRunner(logfile_path, args) as run:
-        # convert to PNG
-        run.pdf_to_png(page_num_pdf, page_num_png, "-r300")
+        logfile_path = os.path.join(dr, "logs", f"{i}{video}.log")
+        with CommandRunner(logfile_path, args) as run:
+            # convert to PNG
+            run.pdf_to_png(page_num_pdf, page_num_png, "-r300")
 
-        if "summary" not in components[1]:
-            doc = fitz.open(page_num_pdf)
-            page = doc[0]
+            if "summary" not in components[1]:
+                doc = fitz.open(page_num_pdf)
+                page = doc[0]
 
-            match = re.search(r"block(\d+)", components[1])
-            block_num = int(match.group(1))
+                match = re.search(r"block(\d+)", components[1])
+                block_num = int(match.group(1))
 
-            for pb in gptpagemap:
-                if isinstance(pb, list):
-                    if pb[1] == page_num and pb[2] == block_num:
-                        coords = block_coords[pb[0]][block_num]
-                        break
+                for pb in gptpagemap:
+                    if isinstance(pb, list):
+                        if pb[1] == page_num and pb[2] == block_num:
+                            coords = block_coords[pb[0]][block_num]
+                            break
 
-            # Load an image
-            image = Image.open(page_num_png)
+                # Load an image
+                image = Image.open(page_num_png)
 
-            # Calculate scale factors
-            scale_x = image.width / page.rect.width
-            scale_y = image.height / page.rect.height
+                # Calculate scale factors
+                scale_x = image.width / page.rect.width
+                scale_y = image.height / page.rect.height
 
-            # Rescale coordinates
-            x0, y0, x1, y1 = coords
-            x0 *= scale_x
-            y0 *= scale_y
-            x1 *= scale_x
-            y1 *= scale_y
+                # Rescale coordinates
+                x0, y0, x1, y1 = coords
+                x0 *= scale_x
+                y0 *= scale_y
+                x1 *= scale_x
+                y1 *= scale_y
 
-            # find out if this rectangle is on the left, right or whole width
-            if coords[2] > page.rect.width / 2:
-                pointerleft = Image.open("imgs/pointertoleft.png")
-                pointer = pointerleft.convert("RGBA")
-                onrightside = True
-            else:
-                pointerright = Image.open("imgs/pointertoright.png")
-                pointer = pointerright.convert("RGBA")
-                onrightside = False
+                # find out if this rectangle is on the left, right or whole width
+                if coords[2] > page.rect.width / 2:
+                    pointerleft = Image.open("imgs/pointertoleft.png")
+                    pointer = pointerleft.convert("RGBA")
+                    onrightside = True
+                else:
+                    pointerright = Image.open("imgs/pointertoright.png")
+                    pointer = pointerright.convert("RGBA")
+                    onrightside = False
 
-            # Create draw object
-            draw = ImageDraw.Draw(image)
+                # Create draw object
+                draw = ImageDraw.Draw(image)
 
-            # Define thickness
-            thickness = 5
+                # Define thickness
+                thickness = 5
 
-            # Draw several rectangles to simulate thickness
-            for i in range(thickness):
-                draw.rectangle([x0 - i - 5, y0 - i - 5, x1 + i + 5, y1 + i + 5], outline="green")
+                # Draw several rectangles to simulate thickness
+                for i in range(thickness):
+                    draw.rectangle([x0 - i - 5, y0 - i - 5, x1 + i + 5, y1 + i + 5], outline="green")
 
-            # Calculate the center of the rectangle
-            rect_center_y = (y0 + y1) / 2
+                # Calculate the center of the rectangle
+                rect_center_y = (y0 + y1) / 2
 
-            # Scale down the pointer image while preserving aspect ratio
-            desired_height = image.height / 20
-            aspect_ratio = pointer.width / pointer.height
-            new_width = int(aspect_ratio * desired_height)
-            pointer = pointer.resize((new_width, int(desired_height)))
+                # Scale down the pointer image while preserving aspect ratio
+                desired_height = image.height / 20
+                aspect_ratio = pointer.width / pointer.height
+                new_width = int(aspect_ratio * desired_height)
+                pointer = pointer.resize((new_width, int(desired_height)))
 
-            # Calculate position for the pointer
-            if onrightside:
-                pointer_x0 = x1 + 20
-            else:
-                pointer_x0 = x0 - 20 - new_width
+                # Calculate position for the pointer
+                if onrightside:
+                    pointer_x0 = x1 + 20
+                else:
+                    pointer_x0 = x0 - 20 - new_width
 
-            pointer_y0 = rect_center_y - (pointer.height / 2)
+                pointer_y0 = rect_center_y - (pointer.height / 2)
 
-            # Paste the pointer on the main image
-            image.paste(pointer, (int(pointer_x0), int(pointer_y0)), pointer)  # The last argument is for transparency
+                # Paste the pointer on the main image
+                image.paste(
+                    pointer, (int(pointer_x0), int(pointer_y0)), pointer
+                )  # The last argument is for transparency
 
-            # Save the combined image to a file
-            image.save(page_num_png)
+                # Save the combined image to a file
+                image.save(page_num_png)
 
-        # process each image-audio pair to create video chunk
+            # process each image-audio pair to create video chunk
 
-        mp3_file = f"{os.path.join(dr, audio)}.mp3"
-        run.create_video_from_image_and_audio(
-            png_file=page_num_png,
-            mp3_file=mp3_file,
-            resolution="scale=1920:-2",
-            video_file=video_file,
-        )
+            mp3_file = f"{os.path.join(dr, audio)}.mp3"
+            run.create_video_from_image_and_audio(
+                png_file=page_num_png,
+                mp3_file=mp3_file,
+                resolution="scale=1920:-2",
+                video_file=video_file,
+            )
 
-        run.extract_video_segment(mp3_file, video_file, final_video_file)
+            run.extract_video_segment(mp3_file, video_file, final_video_file)
 
-        return i, final_video_file
+            return i, final_video_file, None
+    except Exception as e:
+        return i, final_video_file, e
 
 
 def process_short_line(i, line, page_num, dr, args):
@@ -249,7 +256,7 @@ def process_short_line(i, line, page_num, dr, args):
     i_final_mp4 = f"{os.path.join(dr, video)}{i}_final.mp4"
 
     if os.path.exists(i_final_mp4):
-        return i, i_final_mp4
+        return i, i_final_mp4, None
 
     # convert to PNG
     if page_num == 0:
@@ -285,10 +292,10 @@ def process_short_line(i, line, page_num, dr, args):
         # ensure that there is no silence at the end of the video, and video len is the same as audio len
         run([args.ffmpeg, "-i", i_mp4, "-t", str(audio_duration), "-y", "-c", "copy", i_final_mp4])
 
-        return i, i_final_mp4
+        return i, i_final_mp4, None
 
 
-def prepare_tasks(dr, lines, qa_pages):
+def prepare_tasks(dr, lines, qa_pages, args):
     tasks = []
     turn = -1
     page_num = 0
@@ -316,7 +323,7 @@ def prepare_tasks(dr, lines, qa_pages):
     return tasks
 
 
-def process_qa_line(line, line_num, input_path, dr, args) -> tuple[Any, str, str, Exception]:
+def process_qa_line(line, line_num, input_path, dr, args) -> tuple[int, str, str, Exception]:
     try:
         print("process_qa_line", line, line_num, input_path)
 
@@ -356,11 +363,11 @@ def process_qa_line(line, line_num, input_path, dr, args) -> tuple[Any, str, str
 
         return line_num, video_file_final, logfile_path, None
     except Exception as e:
+        print(e)
         return line_num, "", logfile_path, e
 
 
 def main(args):
-    global block_coords, gptpagemap
 
     files = glob.glob(os.path.join(".temp", f"{args.paperid}_files", "zipfile.zip"))
     print(files)
@@ -393,7 +400,7 @@ def main(args):
 
     # filter lines to only include those that have "page4" in them
     # lines = [line for line in lines if "page0" in line]
-    print(lines)
+    # print(lines)
 
     # Group lines by page number
     pages = defaultdict(list)
@@ -416,22 +423,34 @@ def main(args):
     block_coords = pickle.load(open(os.path.join(dr, "block_coords.pkl"), "rb"))
     gptpagemap = pickle.load(open(os.path.join(dr, "gptpagemap.pkl"), "rb"))
 
-    # with Pool(1) as pool:
-    #     results = pool.starmap(process_line, [(i, line, dr, args) for i, line in enumerate(lines)])
+    with Pool(4) as pool:
+        results = pool.starmap(
+            process_line, [(i, line, dr, args, block_coords, gptpagemap) for i, line in enumerate(lines)]
+        )
 
-    # results.sort(key=lambda x: x[0])
-    # with open(mp4_main_list, "w") as outvideo:
-    #     outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file in results])
+    results.sort(key=lambda x: x[0])
+    with open(mp4_main_list, "w") as outvideo:
+        outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file, ex in results if ex is None])
+
+    for _, _, ex in results:
+        if ex:
+            logging.error(f"Error occurred: {ex}")
+
+    # if any results contain an exception, exit with an error
+    if any([ex for _, _, ex in results]):
+        logging.error("An error occurred during the processing of the main video")
+        return
 
     # =============== SHORT VIDEO ====================
 
-    if False:  # os.path.exists(short_mp3s):
+    if os.path.exists(short_mp3s):
         with open(short_mp3s, "r") as f:
             lines = f.readlines()
 
         with Pool(args.num_workers) as pool:
             results = pool.starmap(
-                process_short_line, [(page_num, line, page_num, dr, args) for (page_num, line) in enumerate(lines)]
+                process_short_line,
+                [(page_num, line, page_num, dr, args) for (page_num, line) in enumerate(lines)],
             )
 
         results.sort(key=lambda x: x[0])
