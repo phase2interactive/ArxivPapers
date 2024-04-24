@@ -16,7 +16,8 @@ from datetime import datetime
 import logging
 from typing import Any
 from collections import defaultdict
-
+from ffprobe import FFProbe
+import ffmpeg
 
 logging.basicConfig(level=logging.INFO, format="\n%(asctime)s - %(levelname)s - %(message)s")
 
@@ -40,6 +41,20 @@ class CommandRunner:
             shell=True,
         )
 
+    def extract_video_segment(self, audio_file, video_file, video_file_final) -> tuple[bytes, bytes]:
+        metadata = FFProbe(audio_file)
+        audio_duration = int(metadata.streams[0].duration_seconds()) + 1
+        out, error = (
+            ffmpeg.input(video_file, ss=0, t=audio_duration)
+            .output(video_file_final, codec="copy", y=None)
+            .run(cmd=self.args.ffmpeg, overwrite_output=True, capture_stdout=True, capture_stderr=True)
+        )
+
+        self.logfile.write(out.decode("utf-8"))
+
+        # Optionally also handle stderr
+        self.logfile.write("\nErrors:\n" + error.decode("utf-8"))
+
     def extract_page_as_pdf(self, pdf_file, page_num, output_file) -> subprocess.CompletedProcess[bytes]:
         """
         gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={page_num} -dLastPage={page_num}-sOutputFile={output_file} {pdf_file},
@@ -59,6 +74,25 @@ class CommandRunner:
     def create_video_from_image_and_audio(
         self, png_file, mp3_file, resolution, video_file
     ) -> subprocess.CompletedProcess[bytes]:
+
+        # (
+        #     ffmpeg.input(png_file, loop=1, framerate=1)
+        #     .input(mp3_file)
+        #     .output(
+        #         video_file,
+        #         vf=resolution,
+        #         format="yuv420p",
+        #         vcodec="libx264",
+        #         acodec="aac",
+        #         audio_bitrate="128k",
+        #         tune="stillimage",
+        #         shortest=True,
+        #         y=None,
+        #     )
+        #     .overwrite_output()
+        #     .run()
+        # )
+
         command = f"{self.args.ffmpeg} -loop 1 -i {png_file} -i {mp3_file} -vf {resolution} -c:v libx264 -tune stillimage -y -c:a aac -b:a 128k -pix_fmt yuv420p -shortest {video_file}"
         return self.run(command, check=False, shell=True)
 
@@ -73,11 +107,7 @@ class CommandRunner:
             ret_val = subprocess.run(command, check=check, **kwargs)
         else:
             ret_val = subprocess.run(command, stdout=self.logfile, stderr=self.logfile, check=check, **kwargs)
-        if ret_val.returncode != 0:
-            logging.error(f"\t >> Non-zero return code running command: {cmd_text}")
-            logging.error(f"\t >> Return code: {ret_val.returncode}")
-        else:
-            logging.info(f"\t >> Command {cmd_text} ran successfully")
+        logging.info(f"\t >> Return code: {ret_val.returncode}")
         return ret_val
 
     def __call__(self, command, check=True, **kwargs):
@@ -187,27 +217,15 @@ def process_line(i, line, dr, args) -> tuple[Any | int, str]:
 
         # process each image-audio pair to create video chunk
 
+        mp3_file = f"{os.path.join(dr, audio)}.mp3"
         run.create_video_from_image_and_audio(
             png_file=page_num_png,
-            mp3_file=f"{os.path.join(dr, audio)}.mp3",
+            mp3_file=mp3_file,
             resolution="scale=1920:-2",
             video_file=video_file,
         )
 
-        # Get audio duration
-        result = run(
-            f"{args.ffprobe} -i {os.path.join(dr, audio)}.mp3 -show_entries format=duration -v quiet -of csv=p=0",
-            check=False,
-            capture_output=True,
-            text=True,
-            shell=True,
-        )
-        audio_duration = int(float(result.stdout.strip())) + 1 if result.stdout.strip() else 0
-        if audio_duration == 0:
-            logging.warning(f"Audio duration is 0 for {audio}.mp3")
-
-        # ensure that there is no silence at the end of the video, and video len is the same as audio len
-        run([args.ffmpeg, "-i", video_file, "-t", str(audio_duration), "-y", "-c", "copy", final_video_file])
+        run.extract_video_segment(mp3_file, video_file, final_video_file)
 
         return i, final_video_file
 
@@ -269,11 +287,11 @@ def main(args):
     block_coords = pickle.load(open(os.path.join(dr, "block_coords.pkl"), "rb"))
     gptpagemap = pickle.load(open(os.path.join(dr, "gptpagemap.pkl"), "rb"))
 
-    # with Pool(args.num_workers) as pool:
+    # with Pool(1) as pool:
     #     results = pool.starmap(process_line, [(i, line, dr, args) for i, line in enumerate(lines)])
 
     # results.sort(key=lambda x: x[0])
-    # with open(os.path.join(dr, "mp4_list.txt"), "w") as outvideo:
+    # with open(mp4_main_list, "w") as outvideo:
     #     outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file in results])
 
     # =============== SHORT VIDEO ====================
@@ -306,12 +324,20 @@ def main(args):
         tasks = prepare_tasks(dr, lines, qa_pages)
         print(tasks)
 
-        with Pool(args.num_workers) as pool:
+        with Pool(8) as pool:
             results = pool.starmap(process_qa_line, tasks)
 
         results.sort(key=lambda x: x[0])
         with open(os.path.join(dr, "qa_mp4_list.txt"), "w") as outvideo:
-            outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file in results])
+            outvideo.writelines(
+                [f"file {os.path.basename(mp4_file)}\n" for _, mp4_file, logfile, ex in results if not ex]
+            )
+
+        for _, _, logfile, ex in results:
+            if ex:
+                logging.error(f"Error occurred: {ex}")
+                with open(logfile, "r") as f:
+                    logging.error(f.read())
 
     commands = []
 
@@ -324,6 +350,7 @@ def main(args):
     if os.path.exists(mp4_qa_list):
         commands.append(f"{args.ffmpeg} -f concat -i {mp4_qa_list} " f"-y -c copy {mp4_qa_output}")
 
+    print("::Combining files:")
     print(commands)
     with Pool(len(commands)) as p:
         p.map(os.system, commands)
@@ -415,53 +442,47 @@ def prepare_tasks(dr, lines, qa_pages):
     return tasks
 
 
-def process_qa_line(line, line_num, input_path, dr, args) -> tuple[Any, str]:
+def process_qa_line(line, line_num, input_path, dr, args) -> tuple[Any, str, str, Exception]:
+    try:
+        print("process_qa_line", line, line_num, input_path)
 
-    print("process_qa_line", line, line_num, input_path)
+        # Remove the newline character at the end of the line
+        line = line.strip()
 
-    # Remove the newline character at the end of the line
-    line = line.strip()
+        # Split the line into components
+        components = line.split()
 
-    # Split the line into components
-    components = line.split()
+        # The filename is the second component
+        audio = components[1].replace(".mp3", "")
+        video = audio.replace("-", "")
 
-    # The filename is the second component
-    audio = components[1].replace(".mp3", "")
-    video = audio.replace("-", "")
+        qa_page = os.path.join(dr, f"qa_page_{line_num}.png")
+        video_file = f"{os.path.join(dr, video)}.mp4"
+        video_file_final = f"{os.path.join(dr, video)}_final.mp4"
 
-    qa_page = os.path.join(dr, f"qa_page_{line_num}.png")
-    video_file = f"{os.path.join(dr, video)}.mp4"
-    video_file_final = f"{os.path.join(dr, video)}_final.mp4"
+        logfile_path = os.path.join(dr, "logs", f"{video}.log")
 
-    if os.path.exists(video_file_final):
-        return line_num, video_file_final
+        if os.path.exists(video_file_final):
+            return line_num, video_file_final, logfile_path, None
 
-    logfile_path = os.path.join(dr, "logs", f"{video}.log")
-    with CommandRunner(logfile_path, args) as run:
+        with CommandRunner(logfile_path, args) as run:
+            run.pdf_to_png(input_path, qa_page, "-r500")
+            run.create_video_from_image_and_audio(
+                png_file=qa_page,
+                mp3_file=f"{os.path.join(dr, audio)}.mp3",
+                resolution="scale=1920:-2",
+                video_file=video_file,
+            )
 
-        run.pdf_to_png(input_path, qa_page, "-r500")
-        run.create_video_from_image_and_audio(
-            png_file=qa_page,
-            mp3_file=f"{os.path.join(dr, audio)}.mp3",
-            resolution="scale=1920:-2",
-            video_file=video_file,
-        )
+            metadata = FFProbe(f"{os.path.join(dr, audio)}.mp3")
+            audio_duration = int(metadata.streams[0].duration_seconds()) + 1
 
-        # ensure that there is no silence at the end of the video, and video len is the same as audio len
-        result = run(
-            f"{args.ffprobe} -i {os.path.join(dr, audio)}.mp3 -show_entries format=duration -v quiet -of csv=p=0",
-            check=False,
-            capture_output=True,
-            text=True,
-            shell=True,
-        )
-        audio_duration = int(float(result.stdout.strip())) + 1 if result.stdout.strip() else 0
-        if audio_duration == 0:
-            logging.warning(f"Audio duration is 0 for {audio}.mp3")
+            # ensure that there is no silence at the end of the video, and video len is the same as audio len
+            run([args.ffmpeg, "-i", video_file, "-t", str(audio_duration), "-y", "-c", "copy", video_file_final])
 
-        run([args.ffmpeg, "-i", video_file, "-t", str(audio_duration), "-y", "-c", "copy", video_file_final])
-
-    return line_num, video_file_final
+        return line_num, video_file_final, logfile_path, None
+    except Exception as e:
+        return line_num, "", logfile_path, e
 
 
 if __name__ == "__main__":
