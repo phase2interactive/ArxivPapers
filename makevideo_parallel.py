@@ -230,132 +230,6 @@ def process_line(i, line, dr, args) -> tuple[Any | int, str]:
         return i, final_video_file
 
 
-def main(args):
-    global block_coords, gptpagemap
-
-    files = glob.glob(os.path.join(".temp", f"{args.paperid}_files", "zipfile.zip"))
-    print(files)
-
-    if files:
-        zip_name = max(files, key=os.path.getmtime)
-        dr = os.path.join(".temp", f"{args.paperid}_files", "output")
-    else:
-        return
-
-    if os.path.exists(dr):
-        shutil.rmtree(dr)
-
-    with zipfile.ZipFile(zip_name, "r") as zipf:
-        zipf.extractall(dr)
-
-    mp4_main_list = os.path.join(dr, "mp4_list.txt")
-    mp4_main_output = os.path.join(dr, "output.mp4")
-
-    short_mp3s = os.path.join(dr, "shorts_mp3_list.txt")
-    mp4_short_list = os.path.join(dr, "short_mp4_list.txt")
-    mp4_short_output = os.path.join(dr, "output_short.mp4")
-
-    qa_mp3_list = os.path.join(dr, "qa_mp3_list.txt")
-    mp4_qa_list = os.path.join(dr, "qa_mp4_list.txt")
-    mp4_qa_output = os.path.join(dr, "output_qa.mp4")
-
-    with open(os.path.join(dr, "mp3_list.txt"), "r") as f:
-        lines = f.readlines()
-
-    # filter lines to only include those that have "page4" in them
-    # lines = [line for line in lines if "page0" in line]
-    print(lines)
-
-    # Group lines by page number
-    pages = defaultdict(list)
-    for line in lines:
-        line = line.strip()
-        components = line.split()
-        match = re.search(r"page(\d+)", components[1])
-        page_num = int(match.group(1))
-        pages[page_num].append(line)
-
-    # output each page of the pdf this is used by downstream functions
-    for page_num, _ in pages.items():
-        page_num_filename_no_ext = os.path.join(dr, str(page_num))
-        page_num_pdf = f"{page_num_filename_no_ext}.pdf"
-        logfile_path = os.path.join(dr, "logs", f"pdf.log")
-
-        with CommandRunner(logfile_path, args) as run:
-            run.extract_page_as_pdf(os.path.join(dr, "main.pdf"), page_num + 1, page_num_pdf)
-
-    block_coords = pickle.load(open(os.path.join(dr, "block_coords.pkl"), "rb"))
-    gptpagemap = pickle.load(open(os.path.join(dr, "gptpagemap.pkl"), "rb"))
-
-    # with Pool(1) as pool:
-    #     results = pool.starmap(process_line, [(i, line, dr, args) for i, line in enumerate(lines)])
-
-    # results.sort(key=lambda x: x[0])
-    # with open(mp4_main_list, "w") as outvideo:
-    #     outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file in results])
-
-    # =============== SHORT VIDEO ====================
-
-    if False:  # os.path.exists(short_mp3s):
-        with open(short_mp3s, "r") as f:
-            lines = f.readlines()
-
-        with Pool(args.num_workers) as pool:
-            results = pool.starmap(
-                process_short_line, [(page_num, line, page_num, dr, args) for (page_num, line) in enumerate(lines)]
-            )
-
-        results.sort(key=lambda x: x[0])
-
-        print(mp4_short_output)
-        with open(mp4_short_list, "w") as outvideo:
-            outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file in results])
-
-    # =============== QA VIDEO ====================
-
-    if os.path.exists(qa_mp3_list):
-        with open(qa_mp3_list, "r") as f:
-            lines = f.readlines()
-
-        # lines = [lines[0], lines[1]]
-        print(lines)
-
-        qa_pages = pickle.load(open(os.path.join(dr, "qa_pages.pkl"), "rb"))
-        tasks = prepare_tasks(dr, lines, qa_pages)
-        print(tasks)
-
-        with Pool(8) as pool:
-            results = pool.starmap(process_qa_line, tasks)
-
-        results.sort(key=lambda x: x[0])
-        with open(os.path.join(dr, "qa_mp4_list.txt"), "w") as outvideo:
-            outvideo.writelines(
-                [f"file {os.path.basename(mp4_file)}\n" for _, mp4_file, logfile, ex in results if not ex]
-            )
-
-        for _, _, logfile, ex in results:
-            if ex:
-                logging.error(f"Error occurred: {ex}")
-                with open(logfile, "r") as f:
-                    logging.error(f.read())
-
-    commands = []
-
-    if os.path.exists(mp4_main_list):
-        commands.append(f"{args.ffmpeg} -f concat -i {mp4_main_list} -y -c copy {mp4_main_output}")
-
-    if os.path.exists(mp4_short_list):
-        commands.append(f"{args.ffmpeg} -f concat -i {mp4_short_list} -y -c copy {mp4_short_output}")
-
-    if os.path.exists(mp4_qa_list):
-        commands.append(f"{args.ffmpeg} -f concat -i {mp4_qa_list} " f"-y -c copy {mp4_qa_output}")
-
-    print("::Combining files:")
-    print(commands)
-    with Pool(len(commands)) as p:
-        p.map(os.system, commands)
-
-
 def process_short_line(i, line, page_num, dr, args):
     print(i, line, page_num)
 
@@ -483,6 +357,132 @@ def process_qa_line(line, line_num, input_path, dr, args) -> tuple[Any, str, str
         return line_num, video_file_final, logfile_path, None
     except Exception as e:
         return line_num, "", logfile_path, e
+
+
+def main(args):
+    global block_coords, gptpagemap
+
+    files = glob.glob(os.path.join(".temp", f"{args.paperid}_files", "zipfile.zip"))
+    print(files)
+
+    if files:
+        zip_name = max(files, key=os.path.getmtime)
+        dr = os.path.join(".temp", f"{args.paperid}_files", "output")
+    else:
+        return
+
+    if os.path.exists(dr):
+        shutil.rmtree(dr)
+
+    with zipfile.ZipFile(zip_name, "r") as zipf:
+        zipf.extractall(dr)
+
+    mp4_main_list = os.path.join(dr, "mp4_list.txt")
+    mp4_main_output = os.path.join(dr, "output.mp4")
+
+    short_mp3s = os.path.join(dr, "shorts_mp3_list.txt")
+    mp4_short_list = os.path.join(dr, "short_mp4_list.txt")
+    mp4_short_output = os.path.join(dr, "output_short.mp4")
+
+    qa_mp3_list = os.path.join(dr, "qa_mp3_list.txt")
+    mp4_qa_list = os.path.join(dr, "qa_mp4_list.txt")
+    mp4_qa_output = os.path.join(dr, "output_qa.mp4")
+
+    with open(os.path.join(dr, "mp3_list.txt"), "r") as f:
+        lines = f.readlines()
+
+    # filter lines to only include those that have "page4" in them
+    # lines = [line for line in lines if "page0" in line]
+    print(lines)
+
+    # Group lines by page number
+    pages = defaultdict(list)
+    for line in lines:
+        line = line.strip()
+        components = line.split()
+        match = re.search(r"page(\d+)", components[1])
+        page_num = int(match.group(1))
+        pages[page_num].append(line)
+
+    # output each page of the pdf this is used by downstream functions
+    for page_num, _ in pages.items():
+        page_num_filename_no_ext = os.path.join(dr, str(page_num))
+        page_num_pdf = f"{page_num_filename_no_ext}.pdf"
+        logfile_path = os.path.join(dr, "logs", f"pdf.log")
+
+        with CommandRunner(logfile_path, args) as run:
+            run.extract_page_as_pdf(os.path.join(dr, "main.pdf"), page_num + 1, page_num_pdf)
+
+    block_coords = pickle.load(open(os.path.join(dr, "block_coords.pkl"), "rb"))
+    gptpagemap = pickle.load(open(os.path.join(dr, "gptpagemap.pkl"), "rb"))
+
+    # with Pool(1) as pool:
+    #     results = pool.starmap(process_line, [(i, line, dr, args) for i, line in enumerate(lines)])
+
+    # results.sort(key=lambda x: x[0])
+    # with open(mp4_main_list, "w") as outvideo:
+    #     outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file in results])
+
+    # =============== SHORT VIDEO ====================
+
+    if False:  # os.path.exists(short_mp3s):
+        with open(short_mp3s, "r") as f:
+            lines = f.readlines()
+
+        with Pool(args.num_workers) as pool:
+            results = pool.starmap(
+                process_short_line, [(page_num, line, page_num, dr, args) for (page_num, line) in enumerate(lines)]
+            )
+
+        results.sort(key=lambda x: x[0])
+
+        print(mp4_short_output)
+        with open(mp4_short_list, "w") as outvideo:
+            outvideo.writelines([f"file {os.path.basename(mp4_file)}\n" for _, mp4_file in results])
+
+    # =============== QA VIDEO ====================
+
+    if os.path.exists(qa_mp3_list):
+        with open(qa_mp3_list, "r") as f:
+            lines = f.readlines()
+
+        # lines = [lines[0], lines[1]]
+        print(lines)
+
+        qa_pages = pickle.load(open(os.path.join(dr, "qa_pages.pkl"), "rb"))
+        tasks = prepare_tasks(dr, lines, qa_pages)
+        print(tasks)
+
+        with Pool(8) as pool:
+            results = pool.starmap(process_qa_line, tasks)
+
+        results.sort(key=lambda x: x[0])
+        with open(os.path.join(dr, "qa_mp4_list.txt"), "w") as outvideo:
+            outvideo.writelines(
+                [f"file {os.path.basename(mp4_file)}\n" for _, mp4_file, logfile, ex in results if not ex]
+            )
+
+        for _, _, logfile, ex in results:
+            if ex:
+                logging.error(f"Error occurred: {ex}")
+                with open(logfile, "r") as f:
+                    logging.error(f.read())
+
+    commands = []
+
+    if os.path.exists(mp4_main_list):
+        commands.append(f"{args.ffmpeg} -f concat -i {mp4_main_list} -y -c copy {mp4_main_output}")
+
+    if os.path.exists(mp4_short_list):
+        commands.append(f"{args.ffmpeg} -f concat -i {mp4_short_list} -y -c copy {mp4_short_output}")
+
+    if os.path.exists(mp4_qa_list):
+        commands.append(f"{args.ffmpeg} -f concat -i {mp4_qa_list} " f"-y -c copy {mp4_qa_output}")
+
+    print("::Combining files:")
+    print(commands)
+    with Pool(len(commands)) as p:
+        p.map(os.system, commands)
 
 
 if __name__ == "__main__":
