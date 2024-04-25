@@ -207,9 +207,7 @@ def process_gpt(args, files_dir, text, pagemap, pageblockmap, title, llm_api, ma
     return gpttext, gptpagemap if args.create_video else None
 
 
-def process_speech(
-    args, files_dir, gpttext, gpttext_short, slides_short, questions, answers, gptpagemap, title, abstract
-):
+def process_speech(args, files_dir, gpttext, gpttext_short, slides_short, questions, answers, gptpagemap, title):
     if args.tts_client == "openai":
         tts_client = OpenAITTSClient()
     else:
@@ -352,10 +350,9 @@ def main(args):
     setup_logging(args)
 
     files_dir, main_file = process_latex(args)
-
-    if args.extract_text_only:
-        title, text, abstract = process_html(args, files_dir, main_file)
-        return
+    title, text, abstract = process_html(args, files_dir, main_file)
+    # if args.extract_text_only:
+    #    return None
 
     pagemap, pageblockmap = process_map(args, files_dir, main_file, text)
 
@@ -371,13 +368,11 @@ def main(args):
         gpttext_short, slides_short = None, None
 
     if args.create_qa:
-        questions, answers, qa_pages = gpt_qa_verbalizer(files_dir, llm_api, args.llm_base, matcher, logging)
+        questions, answers, _ = gpt_qa_verbalizer(files_dir, llm_api, args.llm_base, matcher, logging)
     else:
         questions, answers = None, None
 
-    process_speech(
-        args, files_dir, gpttext, gpttext_short, slides_short, questions, answers, gptpagemap, title, abstract, llm_api
-    )
+    process_speech(args, files_dir, gpttext, gpttext_short, slides_short, questions, answers, gptpagemap, title)
     create_summary(abstract, title, args.paperid, llm_api, args.llm_base, files_dir)
     final_audio = os.path.join(files_dir, f"{args.final_audio_file}.mp3")
     os.system(
@@ -394,7 +389,7 @@ def main(args):
 
 
 args = argparse.Namespace(
-    paperid="1910.13461",
+    paperid="2312.05688",
     l2h=True,
     verbose="debug",
     pdflatex="pdflatex",
