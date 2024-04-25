@@ -1,9 +1,8 @@
 import os
 import argparse
-from modal import App, Image, Volume, NetworkFileSystem, Mount, Secret, enter, method, build
+from modal import App, Image, Volume, NetworkFileSystem, Mount, Secret, enter, method, build, web_endpoint
 from sympy import im
 
-from modal import web_endpoint
 from main import main as main_func
 from makevideo_parallel import process_line, process_short_line, process_qa_line, prepare_tasks, CommandRunner
 
@@ -70,8 +69,9 @@ app_image = (
     # )
 )
 
-# vol = Volume.from_name("arxiv-volume", create_if_missing=True)
-volume = NetworkFileSystem.from_name("arxiv-nfs", create_if_missing=True)
+volume = Volume.from_name("arxiv-volume", create_if_missing=True)
+# volume = NetworkFileSystem.from_name("arxiv-nfs", create_if_missing=True)
+# volume.add_local_file("/workspaces/ArxivPapers/.temp/2310.08560/2310.08560.zip")
 
 # volume.
 # volume.add_local_dir("/workspaces/ArxivPapers/.temp/1910.13461_files/", ".temp/1910.13461_files/")
@@ -97,7 +97,8 @@ def latex(args: argparse.Namespace):
 @app.cls(
     cpu=8,
     image=app_image,
-    network_file_systems={"/root/arxivvideo": volume},
+    # network_file_systems={"/root/arxivvideo": volume},
+    volumes={"/root/shared": volume},
     # mounts=[
     #     Mount.from_local_dir(
     #         "/workspaces/ArxivPapers/.temp/1910.13461_files/", remote_path="/root/.temp/1910.13461_files"
@@ -144,12 +145,12 @@ class ArxivVideo:
         import argparse
 
         dr = os.path.join(".temp", args.paperid, "output")
-        zip_path = os.path.join(".temp", args.paperid, f"{args.paperid}.zip")
+        zip_path = os.path.join("shared", args.paperid, f"{args.paperid}.zip")
         os.makedirs(os.path.dirname(zip_path), exist_ok=True)
         os.makedirs(dr, exist_ok=True)
 
-        with open(zip_path, "wb") as f:
-            f.write(zip_bytes)
+        # with open(zip_path, "wb") as f:
+        #    f.write(zip_bytes)
 
         files = glob.glob(zip_path)
         print(files)
@@ -320,11 +321,9 @@ class ArxivVideo:
                 lines = f.readlines()
 
             # lines = [lines[0], lines[1]]
-            print(lines)
 
             qa_pages = pickle.load(open(os.path.join(dr, "qa_pages.pkl"), "rb"))
-            tasks = prepare_tasks(dr, lines, qa_pages, args)
-            print(tasks)
+            tasks = prepare_tasks(dr, lines, qa_pages, args, zip_bytes)
 
             results = list(self.process_qa_line_f.starmap(tasks))
             results.sort(key=lambda x: x[0])
@@ -381,12 +380,12 @@ def main():
     #     f.write(zip_bytes)
 
     zip_bytes = open(zip_file, "rb").read()
-
+    zip_bytes = None
     args = argparse.Namespace(paperid=paperid, gs="gs", ffmpeg="ffmpeg", ffprobe="ffprobe")
     video_args = [
-        # (args, "long"),
+        # (args, "long", zip_bytes),
         (args, "short", zip_bytes),
-        # (args, "qa")
+        # (args, "qa", zip_bytes)
     ]
 
     results = list(arx.makevideo.starmap(video_args))
