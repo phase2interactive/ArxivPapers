@@ -303,7 +303,7 @@ def process_short_line(i, line, page_num, dr, args):
         return i, "", logfile_path, e
 
 
-def prepare_tasks(dr, lines, qa_pages, args, zip_bytes):
+def prepare_tasks(dr, lines, qa_pages, args):
     tasks = []
     turn = -1
     page_num = 0
@@ -327,7 +327,7 @@ def prepare_tasks(dr, lines, qa_pages, args, zip_bytes):
             else:
                 continue  # Skip to the next iteration if indices are out of range
 
-        tasks.append((line, line_num, f"{input_path}.pdf", dr, args, zip_bytes))
+        tasks.append((line, line_num, f"{input_path}.pdf", dr, args))
     return tasks
 
 

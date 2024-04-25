@@ -70,11 +70,7 @@ app_image = (
 )
 
 volume = Volume.from_name("arxiv-volume", create_if_missing=True)
-# volume = NetworkFileSystem.from_name("arxiv-nfs", create_if_missing=True)
-# volume.add_local_file("/workspaces/ArxivPapers/.temp/2310.08560/2310.08560.zip")
-
-# volume.
-# volume.add_local_dir("/workspaces/ArxivPapers/.temp/1910.13461_files/", ".temp/1910.13461_files/")
+VOLUME_PATH = "/root/shared"
 
 
 def latex(args: argparse.Namespace):
@@ -97,17 +93,15 @@ def latex(args: argparse.Namespace):
 @app.cls(
     cpu=8,
     image=app_image,
-    # network_file_systems={"/root/arxivvideo": volume},
-    volumes={"/root/shared": volume},
-    # mounts=[
-    #     Mount.from_local_dir(
-    #         "/workspaces/ArxivPapers/.temp/1910.13461_files/", remote_path="/root/.temp/1910.13461_files"
-    #     )
-    # ],
+    volumes={VOLUME_PATH: volume},
     timeout=60 * 60,
     secrets=[Secret.from_name("llms")],
 )
 class ArxivVideo:
+
+    def __init__(self, args: argparse.Namespace, video_args):
+        self.args = args
+        self.video_args = video_args
 
     # @build()  # add another step to the image build
     def builder(self):
@@ -120,7 +114,7 @@ class ArxivVideo:
 
         download("en_core_web_lg")
 
-    def inititalize_directory(self, args, zip_bytes: bytes):
+    def inititalize_directory(self, args):
 
         from math import e
         from platform import system
@@ -144,26 +138,17 @@ class ArxivVideo:
         import ffmpeg
         import argparse
 
+        # local working directory
         dr = os.path.join(".temp", args.paperid, "output")
-        zip_path = os.path.join("shared", args.paperid, f"{args.paperid}.zip")
-        os.makedirs(os.path.dirname(zip_path), exist_ok=True)
         os.makedirs(dr, exist_ok=True)
 
-        # with open(zip_path, "wb") as f:
-        #    f.write(zip_bytes)
-
-        files = glob.glob(zip_path)
-        print(files)
-
-        if files:
-            zip_name = max(files, key=os.path.getmtime)
-        else:
-            raise Exception("No filze found in zip")
+        # the zip file is on the shared volume
+        zip_path = os.path.join(VOLUME_PATH, args.paperid, f"{args.paperid}.zip")
 
         if os.path.exists(dr):
             shutil.rmtree(dr)
 
-        with zipfile.ZipFile(zip_name, "r") as zipf:
+        with zipfile.ZipFile(zip_path, "r") as zipf:
             zipf.extractall(dr)
 
         file_paths = {
@@ -182,7 +167,7 @@ class ArxivVideo:
 
         # filter lines to only include those that have "page4" in them
         # lines = [line for line in lines if "page0" in line]
-        print(lines)
+        # print(lines)
 
         # Group lines by page number
         pages = defaultdict(list)
@@ -207,51 +192,32 @@ class ArxivVideo:
 
         return dr, lines, pdfs, file_paths
 
+    @enter()
+    def on_enter(self):
+        self.dr, self.lines, self.pdfs, self.file_paths = self.inititalize_directory(self.args)
+
     @method()
     def download_and_zip(self, paperid: str):
+        import shutil
 
-        args = argparse.Namespace(
-            paperid=paperid,
-            l2h=True,
-            verbose="info",
-            pdflatex="pdflatex",
-            latex2html="latex2html",
-            latexmlc="latexmlc",
-            stop_word="",
-            ffmpeg="ffmpeg",
-            gs="gs",
-            cache_dir="cache",
-            gdrive_id="",
-            voice="onyx",
-            final_audio_file="final_audio",
-            chunk_mp3_file_list="mp3_list.txt",
-            manual_gpt=False,
-            include_summary=True,
-            extract_text_only=False,
-            create_video=True,
-            create_short=True,
-            create_qa=True,
-            create_audio_simple=False,
-            llm_strong="gpt-4-0125-preview",
-            llm_base="gpt-4-0125-preview",
-            openai_key=os.environ.get("OPENAI_API_KEY", ""),
-            tts_client="openai",
-        )
+        zip_file = main_func(self.args)
 
-        zip_file = main_func(args)
-        with open(zip_file, "rb") as f:
-            data = f.read()
-            return data
+        volume_path = f"{VOLUME_PATH}/{paperid}/{paperid}.zip"
+
+        # copy zip_file to volume_path
+        shutil.copy(zip_file, volume_path)
+
+        volume.commit()
+
+        return zip_file
 
     @method()
-    def process_line_f(self, i, line, dr, args, zip_bytes):
+    def process_line_f(self, i, line):
 
-        dr, _, _, _ = self.inititalize_directory(args, zip_bytes)
+        block_coords = pickle.load(open(os.path.join(self.dr, "block_coords.pkl"), "rb"))
+        gptpagemap = pickle.load(open(os.path.join(self.dr, "gptpagemap.pkl"), "rb"))
 
-        block_coords = pickle.load(open(os.path.join(dr, "block_coords.pkl"), "rb"))
-        gptpagemap = pickle.load(open(os.path.join(dr, "gptpagemap.pkl"), "rb"))
-
-        i, mp4_file, ex = process_line(i, line, dr, args, block_coords, gptpagemap)
+        i, mp4_file, ex = process_line(i, line, self.dr, self.video_args, block_coords, gptpagemap)
 
         data = b""
         with open(mp4_file, "rb") as f:
@@ -262,9 +228,8 @@ class ArxivVideo:
         return i, mp4_file, data, ex
 
     @method()
-    def process_short_line_f(self, i, line, page_num, dr, args, zip_bytes):
-        dr, _, _, _ = self.inititalize_directory(args, zip_bytes)
-        i, mp4_file, _, ex = process_short_line(i, line, page_num, dr, args)
+    def process_short_line_f(self, i, line, page_num):
+        i, mp4_file, _, ex = process_short_line(i, line, page_num, self.dr, self.video_args)
 
         if ex:
             raise ex
@@ -278,9 +243,8 @@ class ArxivVideo:
             return i, mp4_file, data, ex
 
     @method()
-    def process_qa_line_f(self, i, line, page_num, dr, args, zip_bytes) -> tuple[int, str, bytes, Exception]:
-        dr, _, _, _ = self.inititalize_directory(args, zip_bytes)
-        i, mp4_file, _, ex = process_qa_line(i, line, page_num, dr, args)
+    def process_qa_line_f(self, line, line_num, input_path, dr, args) -> tuple[int, str, bytes, Exception]:
+        i, mp4_file, _, ex = process_qa_line(line, line_num, input_path, self.dr, self.video_args)
 
         data = b""
         with open(mp4_file, "rb") as f:
@@ -291,13 +255,11 @@ class ArxivVideo:
         return i, mp4_file, data, ex
 
     @method()
-    def makevideo(self, args, video_type: str, zip_bytes: bytes):
-        dr, lines, _, file_paths = self.inititalize_directory(args, zip_bytes)
-
+    def makevideo(self, video_type: str):
         if video_type == "long":
             results = list(
                 self.process_line_f.starmap(
-                    [(i, line, dr, args, zip_bytes) for i, line in enumerate(lines)],
+                    [(i, line) for i, line in enumerate(self.lines)],
                     return_exceptions=True,
                 )
             )
@@ -308,27 +270,25 @@ class ArxivVideo:
             results.sort(key=lambda x: x[0])
 
         elif video_type == "short":
-            with open(file_paths["short_mp3s"], "r") as f:
+            with open(self.file_paths["short_mp3s"], "r") as f:
                 lines = f.readlines()
 
-            results = list(
-                self.process_short_line_f.starmap([(i, line, i, dr, args, zip_bytes) for i, line in enumerate(lines)])
-            )
+            results = list(self.process_short_line_f.starmap([(i, line, i) for i, line in enumerate(lines)]))
             results.sort(key=lambda x: x[0])
 
         elif video_type == "qa":
-            with open(file_paths["qa_mp3_list"], "r") as f:
+            with open(self.file_paths["qa_mp3_list"], "r") as f:
                 lines = f.readlines()
 
             # lines = [lines[0], lines[1]]
 
-            qa_pages = pickle.load(open(os.path.join(dr, "qa_pages.pkl"), "rb"))
-            tasks = prepare_tasks(dr, lines, qa_pages, args, zip_bytes)
+            qa_pages = pickle.load(open(os.path.join(self.dr, "qa_pages.pkl"), "rb"))
+            tasks = prepare_tasks(self.dr, lines, qa_pages, self.video_args)
 
             results = list(self.process_qa_line_f.starmap(tasks))
             results.sort(key=lambda x: x[0])
 
-        mp4_list = Path(dr) / "mp4_list.txt"
+        mp4_list = Path(self.dr) / "mp4_list.txt"
         with open(mp4_list, "w") as mp4f:
             for _, mp4_file, data, ex in results:
                 if ex:
@@ -344,7 +304,7 @@ class ArxivVideo:
                     mp4f.write(f"file {os.path.basename(mp4_file)}\n")
         import subprocess
 
-        command, mp4_output = self.create_video_command(args, mp4_list, f"output_{video_type}.mp4")
+        command, mp4_output = self.create_video_command(self.args, mp4_list, f"output_{video_type}.mp4")
         print(command)
         proc_result = subprocess.run(command, shell=True)
         # proc_result = os.system(command)
@@ -358,6 +318,21 @@ class ArxivVideo:
     def create_video_command(self, args, mp4_list, mp4_output):
         return f"{args.ffmpeg} -f concat -i {mp4_list} -y -c copy {mp4_output}", mp4_output
 
+    @method()
+    def run(self, paperid, video_types=["long"]) -> tuple[dict[str, bytes], bytes]:
+
+        # zip_file = self.download_and_zip.remote(paperid)
+        zip_file = f"{VOLUME_PATH}/{paperid}/{paperid}.zip"
+        zip_data = open(zip_file, "rb").read()
+        results = list(self.makevideo.map(video_types))
+
+        videos = {}
+        for data, video_type in results:
+            videos[video_type] = data
+
+        # volume.delete_file(zip_file)
+        return (videos, zip_data)
+
 
 # @stub.function(image=app_image)
 # @web_endpoint()
@@ -367,29 +342,45 @@ class ArxivVideo:
 
 @app.local_entrypoint()
 def main():
-    import argparse
 
     paperid = "2310.08560"
-    zip_file = f".temp/{paperid}/{paperid}.zip"
 
-    arx = ArxivVideo()
+    args = argparse.Namespace(
+        paperid=paperid,
+        l2h=True,
+        verbose="info",
+        pdflatex="pdflatex",
+        latex2html="latex2html",
+        latexmlc="latexmlc",
+        stop_word="",
+        ffmpeg="ffmpeg",
+        gs="gs",
+        cache_dir="cache",
+        gdrive_id="",
+        voice="onyx",
+        final_audio_file="final_audio",
+        chunk_mp3_file_list="mp3_list.txt",
+        manual_gpt=False,
+        include_summary=True,
+        extract_text_only=False,
+        create_video=True,
+        create_short=True,
+        create_qa=True,
+        create_audio_simple=False,
+        llm_strong="gpt-4-0125-preview",
+        llm_base="gpt-4-0125-preview",
+        openai_key=os.environ.get("OPENAI_API_KEY", ""),
+        tts_client="openai",
+    )
 
-    # zip_bytes = arx.download_and_zip.remote(paperid)
-    # os.makedirs(os.path.dirname(zip_file), exist_ok=True)
-    # with open(zip_file, "wb") as f:
-    #     f.write(zip_bytes)
+    video_args = argparse.Namespace(paperid=paperid, gs="gs", ffmpeg="ffmpeg", ffprobe="ffprobe")
 
-    zip_bytes = open(zip_file, "rb").read()
-    zip_bytes = None
-    args = argparse.Namespace(paperid=paperid, gs="gs", ffmpeg="ffmpeg", ffprobe="ffprobe")
-    video_args = [
-        # (args, "long", zip_bytes),
-        (args, "short", zip_bytes),
-        # (args, "qa", zip_bytes)
-    ]
+    arx = ArxivVideo(args, video_args)
 
-    results = list(arx.makevideo.starmap(video_args))
+    images, zip = arx.run.remote(paperid, ["long", "short", "qa"])
 
-    for data, video_type in results:
-        with open(f".temp/{paperid}/{paperid}_{video_type}.mp4", "wb") as f:
-            f.write(data)
+    for k, v in images.items():
+        mp4_file = f".temp/{paperid}/{paperid}_{k}.mp4"
+        with open(mp4_file, "wb") as f:
+            f.write(v)
+            print(f"Saved {mp4_file}")
