@@ -37,6 +37,9 @@ class CommandRunner:
         self.logfile.close()
 
     def pdf_to_png(self, pdf_file, png_file, r="-r500") -> subprocess.CompletedProcess[bytes]:
+        if not os.path.exists(pdf_file):
+            raise FileNotFoundError(f"File not found: {pdf_file}")
+
         return self.run(
             f"{self.args.gs} -sDEVICE=png16m {r} -o {png_file} {pdf_file}",
             shell=True,
@@ -71,6 +74,7 @@ class CommandRunner:
             f"-sOutputFile={output_file}",
             pdf_file,
         ]
+
         return self.run(command)
 
     def create_video_from_image_and_audio(
@@ -99,7 +103,6 @@ class CommandRunner:
         return self.run(command, check=False, shell=True)
 
     def run(self, command, check=True, **kwargs) -> subprocess.CompletedProcess[bytes]:
-
         if kwargs.get("shell", False):
             cmd_text = f"{command}\n"
         else:
@@ -108,7 +111,7 @@ class CommandRunner:
         if kwargs.get("capture_output", False):
             ret_val = subprocess.run(command, check=check, **kwargs)
         else:
-            ret_val = subprocess.run(command, stdout=self.logfile, stderr=self.logfile, check=check, **kwargs)
+            ret_val = subprocess.run(command, check=check, **kwargs)
         logging.info(f"\t >> Return code: {ret_val.returncode}")
         return ret_val
 
@@ -255,9 +258,6 @@ def process_short_line(i, line, page_num, dr, args):
     i_mp4 = f"{os.path.join(dr, video)}_{i}.mp4"
     i_final_mp4 = f"{os.path.join(dr, video)}{i}_final.mp4"
 
-    if os.path.exists(i_final_mp4):
-        return i, i_final_mp4, None
-
     # convert to PNG
     if page_num == 0:
         input_path = os.path.join(dr, str(page_num))
@@ -265,34 +265,42 @@ def process_short_line(i, line, page_num, dr, args):
         input_path = os.path.join(dr, "slides", f"slide_{page_num}")
 
     logfile_path = os.path.join(dr, "logs", f"{i}{video}.log")
-    with CommandRunner(logfile_path, args) as run:
-        run.pdf_to_png(f"{input_path}.pdf", f"{os.path.join(dr, str(page_num))}.png")
+    try:
+        with CommandRunner(logfile_path, args) as run:
+            run.pdf_to_png(f"{input_path}.pdf", f"{os.path.join(dr, str(page_num))}.png")
 
-        run.create_video_from_image_and_audio(
-            png_file=f"{os.path.join(dr, str(page_num))}.png",
-            mp3_file=f"{os.path.join(dr, audio)}.mp3",
-            resolution="scale=1920:-2",
-            video_file=i_mp4,
-        )
+            run.create_video_from_image_and_audio(
+                png_file=f"{os.path.join(dr, str(page_num))}.png",
+                mp3_file=f"{os.path.join(dr, audio)}.mp3",
+                resolution="scale=1920:-2",
+                video_file=i_mp4,
+            )
 
-        # ensure that there is no silence at the end of the video, and video len is the same as audio len
-        result = run(
-            f"{args.ffprobe} -i {os.path.join(dr, audio)}.mp3 -show_entries format=duration -v quiet -of csv='p=0'",
-            check=False,
-            capture_output=True,
-            text=True,
-            shell=True,
-        )
+            # ensure that there is no silence at the end of the video, and video len is the same as audio len
+            result = run(
+                f"{args.ffprobe} -i {os.path.join(dr, audio)}.mp3 -show_entries format=duration -v quiet -of csv='p=0'",
+                check=False,
+                capture_output=True,
+                text=True,
+                shell=True,
+            )
 
-        # get the audio duration
-        audio_duration = int(float(result.stdout.strip())) + 1 if result.stdout.strip() else 0
-        if audio_duration == 0:
-            logging.warning(f"Audio duration is 0 for {audio}.mp3")
+            # get the audio duration
+            audio_duration = int(float(result.stdout.strip())) + 1 if result.stdout.strip() else 0
+            if audio_duration == 0:
+                logging.warning(f"Audio duration is 0 for {audio}.mp3")
 
-        # ensure that there is no silence at the end of the video, and video len is the same as audio len
-        run([args.ffmpeg, "-i", i_mp4, "-t", str(audio_duration), "-y", "-c", "copy", i_final_mp4])
+            # ensure that there is no silence at the end of the video, and video len is the same as audio len
+            run([args.ffmpeg, "-i", i_mp4, "-t", str(audio_duration), "-y", "-c", "copy", i_final_mp4])
 
-        return i, i_final_mp4, None
+            return i, i_final_mp4, logfile_path, None
+    except Exception as e:
+        # read the contents of the log file
+        with open(logfile_path, "r") as f:
+            logging.error(f"Error occurred: {e}")
+            logging.error(f.read())
+
+        return i, "", logfile_path, e
 
 
 def prepare_tasks(dr, lines, qa_pages, args):

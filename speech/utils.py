@@ -45,8 +45,15 @@ class OpenAITTSClient(TTSClient):
     def __init__(self):
         self.client = OpenAI()
 
-    def synthesize_speech(self, text, voice, rate=1.0, files_dir=None, file_name=None):
-        response = self.client.audio.speech.create(model="tts-1-hd", voice="onyx", input=text, speed=rate)
+    def synthesize_speech(
+        self, text, voice, rate=1.0, files_dir=None, file_name=None
+    ) -> tuple[bytes, str] | tuple[None, None]:
+
+        voices = {"Polyglot-1": "onxy", "Studio-O": "alloy", "Studio-Q": "shimmer", "onyx": "onyx"}
+
+        response = self.client.audio.speech.create(
+            model="tts-1", voice=voices.get(voice, "onyx"), input=text, speed=rate
+        )
 
         audio_content = b""
         if files_dir and file_name:

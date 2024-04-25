@@ -139,3 +139,5 @@ def zip_files(files_dir, gs, ffmpeg, create_short, create_qa, create_video, fina
                 zipf.write(file)
 
         os.chdir(original_directory)
+
+    return os.path.join(files_dir, zip_file_name)

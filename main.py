@@ -277,7 +277,7 @@ def main(args):
     crop_pdf(f"{files_dir}/{main_file}.pdf",f"{files_dir}/fpage.pdf", args.gs,
              upper_top=3, top_percent=25, left_percent=12, right_percent=7)
 
-    zip_files(
+    return zip_files(
         files_dir,
         args.gs,
         args.ffmpeg,
