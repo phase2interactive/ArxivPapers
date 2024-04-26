@@ -6,6 +6,7 @@ import pickle
 import random
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 import numpy as np
 import openai
@@ -42,7 +43,7 @@ class DocumentProcessor:
         openai.api_key = self.args.openai_key
         self.llm_api = openai.chat.completions.create
 
-    def setup_logging(self, args):
+    def setup_logging(self, args) -> None:
         if args.verbose == "debug":
             level = logging.DEBUG
         elif args.verbose == "info":
@@ -53,7 +54,7 @@ class DocumentProcessor:
         logging.basicConfig(level=level, format="\n%(asctime)s - %(levelname)s - %(message)s")
         self.logging = logging
 
-    def process_latex(self):
+    def process_latex(self) -> str:
         paper_id = self.args.paperid
         remove_oldfiles_samepaper(paper_id)
         self.files_dir = download_paper(paper_id)
@@ -69,7 +70,7 @@ class DocumentProcessor:
 
         return main_file
 
-    def process_html(self, main_file):
+    def process_html(self, main_file) -> tuple[str, str, str]:
         html_parser = "latex2html" if self.args.l2h else "latexmlc"
         display = "> /dev/null 2>&1" if self.args.verbose != "debug" else ""
 
@@ -117,7 +118,7 @@ class DocumentProcessor:
 
         return title, text, abstract
 
-    def process_map(self, main_file, text):
+    def process_map(self, main_file, text) -> tuple[None, None] | tuple[list[int], list]:
         if not self.args.create_video:
             return None, None
 
@@ -153,7 +154,7 @@ class DocumentProcessor:
 
         return pagemap, pageblockmap
 
-    def process_gpt(self, text, pagemap, pageblockmap, title, matcher):
+    def process_gpt(self, text, pagemap, pageblockmap, title, matcher) -> tuple[str, list | None]:
         tmpdata = {}
 
         if self.args.create_short:
@@ -242,7 +243,7 @@ class DocumentProcessor:
 
         return gpttext, gptpagemap if self.args.create_video else None
 
-    def process_speech(self, gpttext, gpttext_short, slides_short, questions, answers, gptpagemap, title):
+    def process_speech(self, gpttext, gpttext_short, slides_short, questions, answers, gptpagemap, title) -> None:
         if self.args.create_short:
             self.process_short_speech(gpttext_short, slides_short, title)
 
@@ -255,7 +256,7 @@ class DocumentProcessor:
         if self.args.create_audio_simple:
             self.process_simple_speech(gpttext)
 
-    def process_short_speech(self, gpttext_short, slides_short, title):
+    def process_short_speech(self, gpttext_short, slides_short, title) -> None:
         with open(os.path.join(self.files_dir, self.args.chunk_mp3_file_list), "w") as mp3_list_file:
             text_to_speech_short(
                 gpttext_short, slides_short, mp3_list_file, self.files_dir, self.tts_client, self.logging
@@ -280,7 +281,7 @@ class DocumentProcessor:
 
         create_slides(slides_short, os.path.join(self.files_dir, "slides"))
 
-    def process_qa_speech(self, questions, answers, title):
+    def process_qa_speech(self, questions, answers, title) -> None:
         with open(os.path.join(self.files_dir, self.args.chunk_mp3_file_list), "w") as mp3_list_file:
             text_to_speech_qa(
                 questions, answers, mp3_list_file, self.files_dir, self.tts_client, self.args.ffmpeg, self.logging
@@ -303,17 +304,17 @@ class DocumentProcessor:
             self.gdrive_client.upload_audio(f"[QA] {title}", f"{final_audio_qa}")
             self.logging.info("Uploaded QA audio to GDrive")
 
-    def process_video_speech(self, gpttext, gptpagemap):
+    def process_video_speech(self, gpttext, gptpagemap) -> None:
         with open(os.path.join(self.files_dir, self.args.chunk_mp3_file_list), "w") as mp3_list_file:
             text_to_speechvideo(
                 gpttext, mp3_list_file, self.files_dir, self.tts_client, gptpagemap, self.args.voice, self.logging
             )
 
-    def process_simple_speech(self, gpttext):
+    def process_simple_speech(self, gpttext) -> None:
         with open(os.path.join(self.files_dir, self.args.chunk_mp3_file_list), "w") as mp3_list_file:
             text_to_speech(gpttext, mp3_list_file, self.files_dir, self.tts_client, self.args.voice, self.logging)
 
-    def process_zip(self, main_file):
+    def process_zip(self, main_file) -> str:
         renamed_main = "main"
         if main_file != renamed_main:
             temp_filename = f"temp_{random.randint(1000, 9999)}"
@@ -347,7 +348,7 @@ class DocumentProcessor:
             "> /dev/null 2>&1",
         )
 
-    def main(self):
+    def main(self) -> str:
         main_file = self.process_latex()
         title, text, abstract = self.process_html(main_file)
         # if self.args.extract_text_only:
