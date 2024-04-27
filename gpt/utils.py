@@ -126,7 +126,6 @@ def gpt_short_verbalizer(files_dir, llm_api, llm_strong, llm_base, logging):
         {'role': 'user', 'content': prompt}
     ]
 
-
     for i in range(3):
         try:
             response = llm_api(model=llm_strong,
@@ -663,7 +662,7 @@ def gpt_text_verbalizer(text, llm_api, llm_base, manual, include_summary, loggin
 
 
 # Summarize Abstract
-def create_summary(abstract, title, paper_id, llm_api, llm_base, files_dir):
+def create_summary(abstract, title, paper_id, llm_api, llm_base, files_dir) -> str:
     sys_message = "Given the abstract for the paper, summarize it in 30 words or less. " \
                   "Make sure the generated summary contains no more than 30 words."
     human_message = abstract
@@ -679,7 +678,7 @@ def create_summary(abstract, title, paper_id, llm_api, llm_base, files_dir):
         except:
             time.sleep(5)
     else:
-        summary = ''
+        summary = ""
 
     with open(os.path.join(files_dir, 'abstract.txt'), 'w') as f:
         f.write(title)
@@ -689,3 +688,4 @@ def create_summary(abstract, title, paper_id, llm_api, llm_base, files_dir):
         f.write(f'https://arxiv.org/abs//{paper_id}\n\n')
         f.write('YouTube: https://www.youtube.com/@ArxivPapers\n\nTikTok: https://www.tiktok.com/@arxiv_papers\n\nApple Podcasts: https://podcasts.apple.com/us/podcast/arxiv-papers/id1692476016\n\nSpotify: https://podcasters.spotify.com/pod/show/arxiv-papers\n')
 
+    return os.path.join(files_dir, "abstract.txt")

@@ -13,6 +13,8 @@ from difflib import SequenceMatcher
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 
+import concurrent.futures
+
 class Matcher:
     def __init__(self, cache_dir):
         # Load tokenizer and model
@@ -65,7 +67,6 @@ class Matcher:
         seq = torch.argmax(cos_sim_matrix, dim=1).tolist()
 
         return seq
-
 
     def fuzz_matcher(self, sentences1, sentences2):
         seq = []
@@ -120,38 +121,38 @@ class Matcher:
 
         return seq
 
-
-    def match(self, sentences1, sentences2, minilm=None, bert=None, fuzz=None, spacy=None, diff=None, tfidf=None, pnt=False):
-        allseq = []
+    def match(
+        self, sentences1, sentences2, minilm=None, bert=None, fuzz=None, spacy=None, diff=None, tfidf=None, pnt=False
+    ):
+        matchers = []
 
         if minilm:
-            allseq.append(self.miniLM_matcher(sentences1, sentences2))
-
+            matchers.append(self.miniLM_matcher)
         if bert:
-            allseq.append(self.bert_matcher(sentences1, sentences2))
-
+            matchers.append(self.bert_matcher)
         if fuzz:
-            allseq.append(self.fuzz_matcher(sentences1, sentences2))
-
+            matchers.append(self.fuzz_matcher)
         if spacy:
-            allseq.append(self.spacy_matcher(sentences1, sentences2))
-
+            matchers.append(self.spacy_matcher)
         if diff:
-            allseq.append(self.diff_matcher(sentences1, sentences2))
-
+            matchers.append(self.diff_matcher)
         if tfidf:
-            allseq.append(self.tfidf_matcher(sentences1, sentences2))
+            matchers.append(self.tfidf_matcher)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(matcher, sentences1, sentences2) for matcher in matchers]
+            allseq = [future.result() for future in concurrent.futures.as_completed(futures)]
 
         mergedseq = np.array(allseq)
 
         if pnt:
-            print('Individual matches:')
+            print("Individual matches:")
             print(mergedseq)
 
-        #majority voting
+        # majority voting
         seq = np.apply_along_axis(lambda x: np.bincount(x).argmax(), axis=0, arr=mergedseq)
         if pnt:
-            print('Consensus match:')
+            print("Consensus match:")
             print(seq)
 
         return seq
