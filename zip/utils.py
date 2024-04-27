@@ -37,7 +37,23 @@ def crop_pdf(input_pdf_path, output_pdf_path, gs, upper_top, top_percent, left_p
     os.system(f'{gs} -sDEVICE=png16m -r500 -o {output_pdf_path}.png {output_pdf_path}')
 
 
-def zip_files(files_dir, gs, ffmpeg, create_short, create_qa, create_video, final_audio_file, chunk_mp3_file_list, display):
+def zip_files_w_args(args, files_dir) -> str:
+    return zip_files(
+        files_dir,
+        args.gs,
+        args.ffmpeg,
+        args.create_short,
+        args.create_qa,
+        args.create_video,
+        args.final_audio_file,
+        args.chunk_mp3_file_list,
+        "",
+    )
+
+
+def zip_files(
+    files_dir, gs, ffmpeg, create_short, create_qa, create_video, final_audio_file, chunk_mp3_file_list, display
+) -> str:
 
     files_to_zip = []
     if create_short:
@@ -135,9 +151,12 @@ def zip_files(files_dir, gs, ffmpeg, create_short, create_qa, create_video, fina
         with zipfile.ZipFile(zip_file_name, 'w') as zipf:
             # Loop through the list of files
             for file in files_to_zip:
+                print(file)
                 # Add each file to the zip file
                 zipf.write(file)
 
         os.chdir(original_directory)
 
-    return os.path.join(files_dir, zip_file_name)
+    zip_file = os.path.join(files_dir, zip_file_name)
+    print(f"Zipped files to {zip_file}")
+    return zip_file
