@@ -3,7 +3,7 @@ import argparse
 from modal import App, Image, Volume, NetworkFileSystem, Mount, Secret, enter, method, build, web_endpoint
 from sympy import im
 
-from main import main as main_func
+# from main import main as main_func
 from makevideo_parallel import process_line, process_short_line, process_qa_line, prepare_tasks, CommandRunner
 
 import pickle
@@ -16,9 +16,12 @@ from gpt.utils import *
 from speech.utils import *
 from zip.utils import *
 from gdrive.utils import *
+from main3 import DocumentProcessor, try_decorator, list_files, Verbalizer
 import random
 from pathlib import Path
 
+volume = Volume.from_name("arxiv-volume", create_if_missing=True)
+VOLUME_PATH = "/root/shared"
 
 def builder():
     import nltk
@@ -29,16 +32,6 @@ def builder():
     from spacy.cli import download
 
     download("en_core_web_lg")
-
-
-def list_files(startpath):
-    for root, dirs, files in os.walk(startpath):
-        level = root.replace(startpath, "").count(os.sep)
-        indent = " " * 4 * (level)
-        print(f"{indent}{os.path.basename(root)}/")
-        subindent = " " * 4 * (level + 1)
-        for f in files:
-            print(f"{subindent}{f}")
 
 
 app = App("arxiv")
@@ -68,9 +61,6 @@ app_image = (
     #     "apt-get update && apt-get install -y google-cloud-cli",
     # )
 )
-
-volume = Volume.from_name("arxiv-volume", create_if_missing=True)
-VOLUME_PATH = "/root/shared"
 
 
 def latex(args: argparse.Namespace):
@@ -194,22 +184,232 @@ class ArxivVideo:
 
     @enter()
     def on_enter(self):
-        self.dr, self.lines, self.pdfs, self.file_paths = self.inititalize_directory(self.args)
+        zip_path = os.path.join(VOLUME_PATH, self.args.paperid, f"{self.args.paperid}.zip")
+        if os.path.exists(zip_path):
+            self.dr, self.lines, self.pdfs, self.file_paths = self.inititalize_directory(self.args)
 
     @method()
     def download_and_zip(self, paperid: str):
         import shutil
-
-        zip_file = main_func(self.args)
-
         volume_path = f"{VOLUME_PATH}/{paperid}/{paperid}.zip"
 
-        # copy zip_file to volume_path
+        processor = DocumentProcessor(self.args)
+
+        # zip_file = processor.main_threaded()
+        zip_file = self.get_zip()
+
+        # copy zip_file to shared volume
+        os.makedirs(os.path.dirname(volume_path), exist_ok=True)
         shutil.copy(zip_file, volume_path)
 
         volume.commit()
 
-        return zip_file
+        return volume_path
+
+    def get_speech_blocks_for_video(self, text, pageblockmap):
+        splits = sent_tokenize(text)
+
+        assert len(pageblockmap) == len(splits), "Number of pageblockmap does not match number of splits"
+
+        block_text = []
+        prev = pageblockmap[0]
+        last_page = 0
+
+        for ind, m in enumerate(pageblockmap):
+            if m == prev:
+                block_text.append(splits[ind])
+                continue
+
+            joinedtext = " ".join(block_text)
+            if isinstance(prev, list):
+                last_page = prev[1]
+                yield joinedtext, prev[1], prev[2]
+            else:
+                yield joinedtext, last_page, None
+
+            prev = m
+            block_text = [splits[ind]]
+
+    @method()
+    def text_to_speech(self, text, page=None, block=None) -> tuple[bytes, str]:
+        processor = DocumentProcessor(self.args)
+
+        if block is None:
+            chunk_audio_file_name = f"page{page}summary_{hash(text)}.mp3"
+        else:
+            chunk_audio_file_name = f"page{page}block{block}_{hash(text)}.mp3"
+
+        audio, file_path = processor.tts_client.synthesize_speech(
+            text, self.args.voice, 1.0, ".", chunk_audio_file_name
+        )
+
+        assert audio is not None, "Audio is None"
+        assert file_path is not None, "File path is None"
+
+        return audio, chunk_audio_file_name
+
+    @method()
+    def verbalize_section(self, sec, pagemap_section):
+        verbalizer = Verbalizer(self.args, Matcher(self.args.cache_dir), logging)
+        return verbalizer.process_section(sec, pagemap_section)
+
+    def get_zip(self):
+        processor = DocumentProcessor(self.args)
+        args = self.args
+        print(" ==== LATEX =============================================")
+        main_file = processor.process_latex()
+        print(" ==== HTML ==============================================")
+        title, text, abstract = processor.process_html(main_file)
+        # if self.args.extract_text_only:
+        #    return None
+        print(" ==== MAP ==============================================")
+        _, pageblockmap = processor.process_map(main_file, text)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+
+            futures = []
+
+            @try_decorator
+            def create_video() -> dict[str, Any]:
+                print(" ==== create_video ==============================================")
+                verbalizer = Verbalizer(args, Matcher(args.cache_dir), logging)
+                sections, pagemap_sections = verbalizer.get_sections(text, pageblockmap)
+
+                map_args = [(sec, pagemap_sections[i]) for i, sec in enumerate(sections)]
+                results = list(self.verbalize_section.starmap(map_args))
+
+                gpttext, gptpagemap, verbalizer_steps, textpagemap = verbalizer.process_results(results)
+
+                with open(os.path.join(processor.files_dir, "gptpagemap.pkl"), "wb") as f:
+                    pickle.dump(gptpagemap, f)
+
+                with open(os.path.join(processor.files_dir, "gpt_verb_steps.txt"), "w") as f:
+                    for si, s in enumerate(verbalizer_steps):
+                        f.write(f"===Original {si}===\n\n")
+                        f.write(s[0])
+                        f.write("\n\n")
+                        f.write(f"===GPT {si}===\n\n")
+                        f.write(s[1])
+                        f.write("\n\n")
+
+                with open(os.path.join(processor.files_dir, "gpt_text.txt"), "w") as f:
+                    f.write(gpttext)
+
+                logging.info(f"Extracted text:\n\n {gpttext}")
+
+                print("=" * 10, "text to speech", "=" * 30)
+                speech = list(self.get_speech_blocks_for_video(gpttext, gptpagemap))
+
+                for t, page, block in speech:
+                    # print the first 10 chars of text
+                    print(f"text:{t[:10]} page: {page}, block: {block}")
+
+                results = list(self.text_to_speech.starmap(speech))
+                with open(os.path.join(processor.files_dir, self.args.chunk_mp3_file_list), "w") as mp3_list_file:
+                    for audio_data, chunk_audio_file_name in results:
+                        mp3_file = os.path.join(processor.files_dir, os.path.basename(chunk_audio_file_name))
+                        with open(mp3_file, "wb") as f:
+                            f.write(audio_data)
+
+                        print(self.args.chunk_mp3_file_list, mp3_file)
+                        mp3_list_file.write(f"file {chunk_audio_file_name}\n")
+
+                return {
+                    "gpttext": gpttext,
+                    "gptpagemap": gptpagemap,
+                    "verbalizer_steps": verbalizer_steps,
+                    "textpagemap": textpagemap,
+                }
+
+            @try_decorator
+            def create_short() -> dict[str, Any]:
+                print(" ==== create_short ==============================================")
+                gpttext_short, slides_short = gpt_short_verbalizer(
+                    processor.files_dir, processor.llm_api, args.llm_strong, args.llm_base, logging
+                )
+                with open(os.path.join(processor.files_dir, "gpt_text_short.txt"), "w") as f:
+                    f.write(gpttext_short)
+
+                with open("gpt_slides_short.json", "w") as json_file:
+                    json.dump(slides_short, json_file, indent=4)
+
+                processor.process_short_speech(gpttext_short, slides_short, title)
+                return {"gpttext_short": gpttext_short, "gptslides_short": slides_short["slides"]}
+
+            @try_decorator
+            def create_qa() -> dict[str, Any]:
+                print(" ==== create_qa ==============================================")
+                questions, answers, qa_pages = gpt_qa_verbalizer(
+                    processor.files_dir, processor.llm_api, args.llm_base, Matcher(args.cache_dir), logging
+                )
+
+                create_questions(questions, os.path.join(processor.files_dir, "questions"))
+
+                with open(os.path.join(processor.files_dir, "qa_pages.pkl"), "wb") as f:
+                    pickle.dump(qa_pages, f)
+
+                with open(os.path.join(processor.files_dir, "gpt_questions_answers.txt"), "w") as f:
+                    for q, a in zip(questions, answers):
+                        f.write(f"==== Question ====\n\n")
+                        f.write(q)
+                        f.write("\n\n")
+                        f.write(f"==== Answer ====\n\n")
+                        f.write(a)
+                        f.write("\n\n")
+
+                processor.process_qa_speech(questions, answers, title)
+                return {"gpttext_q": questions, "gpttext_a": answers, "qa_pages": qa_pages}
+
+            @try_decorator
+            def create_simple() -> dict[str, Any]:
+                print(" ==== create_simple ==============================================")
+                gpttext, verbalizer_steps = gpt_text_verbalizer(
+                    text, processor.llm_api, args.llm_base, args.manual_gpt, args.include_summary, logging
+                )
+                processor.process_simple_speech(gpttext)
+                return {"gpttext": gpttext}
+
+            if args.create_short:
+                futures.append(executor.submit(create_short))
+
+            if args.create_qa:
+                futures.append(executor.submit(create_qa))
+
+            if args.create_video:
+                futures.append(executor.submit(create_video))
+
+            if args.create_audio_simple:
+                futures.append(executor.submit(create_simple))
+
+            create_summary(
+                abstract, title, processor.args.paperid, processor.llm_api, processor.args.llm_base, processor.files_dir
+            )
+
+            concurrent.futures.wait(futures)
+
+            tmpdata = {}
+            for future in futures:
+                result, ex = future.result()
+                if not ex:
+                    tmpdata.update(result)
+                else:
+                    raise ex
+
+            if len(tmpdata) > 0:
+                with open(os.path.join(processor.files_dir, "tmpdata.pkl"), "wb") as f:
+                    pickle.dump(tmpdata, f)
+
+        final_audio = os.path.join(processor.files_dir, f"{processor.args.final_audio_file}.mp3")
+        os.system(
+            f"{processor.args.ffmpeg} -f concat -i {os.path.join(processor.files_dir, processor.args.chunk_mp3_file_list)} -c copy {final_audio} > /dev/null 2>&1"
+        )
+        processor.logging.info("Created audio file")
+
+        if processor.args.gdrive_id:
+            processor.gdrive_client.upload_audio(title, f"{final_audio}")
+            processor.logging.info("Uploaded audio to GDrive")
+
+        return processor.process_zip(main_file)
 
     @method()
     def process_line_f(self, i, line):
@@ -269,14 +469,14 @@ class ArxivVideo:
 
             results.sort(key=lambda x: x[0])
 
-        elif video_type == "short":
+        elif video_type == "short" and "short_mp3s" in self.file_paths:
             with open(self.file_paths["short_mp3s"], "r") as f:
                 lines = f.readlines()
 
             results = list(self.process_short_line_f.starmap([(i, line, i) for i, line in enumerate(lines)]))
             results.sort(key=lambda x: x[0])
 
-        elif video_type == "qa":
+        elif video_type == "qa" and "qa_mp3_list" in self.file_paths:
             with open(self.file_paths["qa_mp3_list"], "r") as f:
                 lines = f.readlines()
 
@@ -321,17 +521,18 @@ class ArxivVideo:
     @method()
     def run(self, paperid, video_types=["long"]) -> tuple[dict[str, bytes], bytes]:
 
-        # zip_file = self.download_and_zip.remote(paperid)
-        zip_file = f"{VOLUME_PATH}/{paperid}/{paperid}.zip"
+        zip_file = self.download_and_zip.remote(paperid)
+        volume.reload()
+        # zip_file = f"{VOLUME_PATH}/{paperid}/{paperid}.zip"
         zip_data = open(zip_file, "rb").read()
-        results = list(self.makevideo.map(video_types))
+        # results = list(self.makevideo.map(video_types))
 
         videos = {}
-        for data, video_type in results:
-            videos[video_type] = data
+        # for data, video_type in results:
+        #   videos[video_type] = data
 
         # volume.delete_file(zip_file)
-        return (videos, zip_data)
+        return videos, zip_data
 
 
 # @stub.function(image=app_image)
@@ -343,7 +544,7 @@ class ArxivVideo:
 @app.local_entrypoint()
 def main():
 
-    paperid = "2310.08560"
+    paperid = "1706.03762"
 
     args = argparse.Namespace(
         paperid=paperid,
@@ -365,7 +566,7 @@ def main():
         extract_text_only=False,
         create_video=True,
         create_short=True,
-        create_qa=True,
+        create_qa=False,
         create_audio_simple=False,
         llm_strong="gpt-4-0125-preview",
         llm_base="gpt-4-0125-preview",
@@ -377,10 +578,87 @@ def main():
 
     arx = ArxivVideo(args, video_args)
 
-    images, zip = arx.run.remote(paperid, ["long", "short", "qa"])
+    images, zip = arx.run.remote(paperid, ["long", "short"])
+
+    zip_file = f".temp/{paperid}/{paperid}.zip"
+    os.makedirs(os.path.dirname(zip_file), exist_ok=True)
+    with open(zip_file, "wb") as f:
+        f.write(zip)
+        print(f"Saved {zip_file}")
 
     for k, v in images.items():
         mp4_file = f".temp/{paperid}/{paperid}_{k}.mp4"
         with open(mp4_file, "wb") as f:
             f.write(v)
             print(f"Saved {mp4_file}")
+
+
+def test():
+    paperid = "1706.03762"
+    args = argparse.Namespace(
+        paperid=paperid,
+        l2h=True,
+        verbose="info",
+        pdflatex="pdflatex",
+        latex2html="latex2html",
+        latexmlc="latexmlc",
+        stop_word="",
+        ffmpeg="ffmpeg",
+        gs="gs",
+        cache_dir="cache",
+        gdrive_id="",
+        voice="onyx",
+        final_audio_file="final_audio",
+        chunk_mp3_file_list="mp3_list.txt",
+        manual_gpt=False,
+        include_summary=True,
+        extract_text_only=False,
+        create_video=True,
+        create_short=True,
+        create_qa=False,
+        create_audio_simple=False,
+        llm_strong="gpt-4-0125-preview",
+        llm_base="gpt-4-0125-preview",
+        openai_key=os.environ.get("OPENAI_API_KEY", ""),
+        tts_client="openai",
+    )
+
+    video_args = argparse.Namespace(paperid=paperid, gs="gs", ffmpeg="ffmpeg", ffprobe="ffprobe")
+
+    with open(f".temp/{paperid}_files/gpt_text.txt", "r") as f:
+        tx = f.read()
+
+    with open(f".temp/{paperid}_files/gptpagemap.pkl", "rb") as f:
+        pagemap = pickle.load(f)
+
+    def get_speech_blocks_for_video(text, pageblockmap):
+        splits = sent_tokenize(text)
+
+        assert len(pageblockmap) == len(splits), "Number of pageblockmap does not match number of splits"
+
+        block_text = []
+        prev = pageblockmap[0]
+        last_page = 0
+
+        for ind, m in enumerate(pageblockmap):
+            if m == prev:
+                block_text.append(splits[ind])
+                continue
+
+            joinedtext = " ".join(block_text)
+            if isinstance(prev, list):
+                last_page = prev[1]
+                yield joinedtext, prev[1], prev[2]
+            else:
+                yield joinedtext, last_page, None
+
+            prev = m
+            block_text = [splits[ind]]
+
+    speech = list(get_speech_blocks_for_video(tx, pagemap))
+    for t, page, block in speech:
+        # print the first 10 chars of text
+        print(f"text:{t[:10]} page: {page}, block: {block}")
+
+
+test()

@@ -3,6 +3,7 @@ from PyPDF2 import PdfReader, PdfWriter
 from glob import glob
 import datetime
 import zipfile
+import logging
 
 
 def crop_pdf(input_pdf_path, output_pdf_path, gs, upper_top, top_percent, left_percent, right_percent):
@@ -127,7 +128,7 @@ def zip_files(
         with open(f"{os.path.join(files_dir, chunk_mp3_file_list)}", "r") as f:
             lines = f.readlines()
 
-        files_to_zip.extend(['main.pdf', chunk_mp3_file_list, 'block_coords.pkl', 'gptpagemap.pkl'])
+        files_to_zip.extend(["main.pdf", chunk_mp3_file_list, "block_coords.pkl", "gptpagemap.pkl", "gpt_text.txt"])
 
         # Process each line
         for line in lines:
@@ -151,6 +152,10 @@ def zip_files(
         with zipfile.ZipFile(zip_file_name, 'w') as zipf:
             # Loop through the list of files
             for file in files_to_zip:
+                if not os.path.exists(file):
+                    logging.warning(f"File {file} does not exist. Skipping.")
+                    continue
+
                 print(file)
                 # Add each file to the zip file
                 zipf.write(file)
