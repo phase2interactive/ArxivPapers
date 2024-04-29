@@ -57,6 +57,11 @@ class Verbalizer:
         openai.api_key = args.openai_key
         self.llm_api = openai.chat.completions.create
 
+    def generate_messages(self, text, pageblockmap):
+        sections, pagemap_secations = self.get_sections(text, pageblockmap)
+
+        yield from self.generate_messages_for_sections(sections, pagemap_secations)
+
     def get_sections(self, text, pageblockmap):
         splits = sent_tokenize(text)
         sections_split = []
@@ -72,64 +77,141 @@ class Verbalizer:
         sections = [" ".join(sec) for sec in sections_split]
         return sections, pagemap_sections
 
-    def process_sections(self, sections, pagemap_sections):
-        results = [self.process_section(sec, pagemap_sections[i]) for i, sec in enumerate(sections)]
-        return self.process_results(results)
+    def generate_messages_for_sections(self, sections, pagemap_sections):
+        curr_upd = []
+        curr = ""
+        page_inds = []
+        for i_s, sec in enumerate(sections):
 
-    def process_results(self, results):
+            # if there is a mismatch, do this hack to make them of equal length
+            if len(sent_tokenize(sec)) != len(pagemap_sections[i_s]):
+                minN = min(len(sent_tokenize(sec)), len(pagemap_sections[i_s]))
+                cleaned_sent_tok = sent_tokenize(sec)[:minN]
+                cleaned_pmap_sec = pagemap_sections[i_s][:minN]
+            else:
+                cleaned_sent_tok = sent_tokenize(sec)
+                cleaned_pmap_sec = pagemap_sections[i_s]
+
+            page_inds += cleaned_pmap_sec
+
+            curr += sec
+
+            for c in cleaned_sent_tok:
+                curr_upd.append(c.replace("###.", " ").replace("###", ""))
+
+            if i_s < len(sections) - 1 and len(self.encoding.encode(curr)) < 1000:
+                continue
+
+            re_result = re.search(r"###(.*?)###", curr)
+            if re_result:
+                sectionName = re_result.group(1)
+            else:
+                sectionName = ""
+
+            sectionName = sectionName.rstrip()
+            if sectionName.endswith("."):
+                sectionName = sectionName[:-1]
+
+            curr_upto_upto4k = " ".join(curr_upd)
+            while len(self.encoding.encode(curr_upto_upto4k)) > 3800:
+                curr_upto_upto4k = curr_upto_upto4k[:-100]
+
+            messages = [(self.prepare_messages(curr_upto_upto4k), self.llm_strong, "paraphrase")]
+
+            if self.include_summary:
+                messages.append((self.prepare_summary_messages(curr_upto_upto4k), self.llm_base, "summary"))
+
+            yield messages, sectionName, curr_upto_upto4k, curr_upd, page_inds
+            page_inds = []
+            curr_upd = []
+            curr_upto_upto4k = ""
+            curr = ""
+
+    def get_gpt_responses(self, section_messages) -> list[tuple[Any, Any, Any, list[tuple[Any, str]]]]:
+        return [
+            (sectionName, curr_upd, page_inds, [(t, self.get_gpt_text(batch, model)[0]) for batch, model, t in batches])
+            for batches, sectionName, curr_upto_upto4k, curr_upd, page_inds in section_messages
+        ]
+
+    def process_results(self, responses: tuple[str, Any, Any, list[tuple[Any, str]]]) -> tuple[str, list, list, list]:
         gpttext_all = ""
         gptpagemap = []
         textpagemap = []
         verbalizer_steps = []
-        for result in results:
-            gpttext_all += result["addedtext"] + result["smry"]
-            gptpagemap += result["gptpagemap_section"] + result["smry_fakepagemap_section"]
-            textpagemap += result["textpagemap_section"] + [-1]
-            verbalizer_steps.append(result["verbalizer_step"])
 
-            # Sanity check after processing each section
-            if len(sent_tokenize(gpttext_all)) != len(gptpagemap):
-                raise Exception("Something went wrong. Mismatch between map and text after processing a section")
+        for sectionName, curr_upd, page_inds, gpt_response in responses:
+            prefix = {
+                "paraphrase": f"Section: {sectionName}.",
+                "summary": " Section Summary: ",
+            }
+
+            response_by_type = {
+                message_type: " ".join([gpt_text for t, gpt_text in gpt_response if message_type == t])
+                for message_type in set(t for t, _ in gpt_response)
+            }
+
+            pprint(response_by_type)
+
+            # expand response_by_type by converting the value to a tuple
+            response_by_type = {k: (v, f"{prefix[k]} {v}") for k, v in response_by_type.items()}
+
+            gpttext, prefixed_text = response_by_type["paraphrase"]
+            gptpagemap_section, textpagemap_section = map_gpttext_to_text(
+                prefixed_text, curr_upd, page_inds, self.matcher
+            )
+            smry_fakepagemap_section = [-1] * len(sent_tokenize(response_by_type["summary"][1]))
+
+            gpttext_all += " ".join([v[1] for k, v in response_by_type.items()])
+            gptpagemap += gptpagemap_section + smry_fakepagemap_section
+            textpagemap += textpagemap_section + [-1]
+
+            verbalizer_steps.append([" ".join(curr_upd), gpttext])
+
+            # if len(sent_tokenize(gpttext_all)) != len(gptpagemap):
+            #    raise Exception("Mismatch between generated text and page mapping after processing a section")
 
         return gpttext_all, gptpagemap, verbalizer_steps, textpagemap
 
-    def process_section(self, sec, pagemap_section) -> dict[str, Any]:
-        cleaned_sent_tok = sent_tokenize(sec)
-        page_inds = pagemap_section[: len(cleaned_sent_tok)]
-        curr_upd = [c.replace("###.", " ").replace("###", "") for c in cleaned_sent_tok]
-        curr_upto_upto4k = " ".join(curr_upd)
-        while len(self.encoding.encode(curr_upto_upto4k)) > 3800:
-            curr_upto_upto4k = curr_upto_upto4k[:-100]
-
-        messages, sectionName = self.prepare_messages(curr_upto_upto4k)
-        self.logging.info(f"Section: {sectionName}\n")
-        self.logging.info(messages[0]["content"] + " " + messages[1]["content"])
-        self.logging.info("-" * 100)
-
-        gpttext, _, _ = self.get_gpt_text(messages)
-        addedtext, gptpagemap_section, textpagemap_section = self.finalize_text(
-            gpttext, curr_upd, page_inds, sectionName
+    def prepare_messages(self, curr_upto_upto4k) -> list[dict[str, str]]:
+        sys_message_func = (
+            f"You are an ArXiv paper audio paraphraser. Your primary goal is to "
+            "rephrase the original paper content while preserving its overall "
+            "meaning and structure, but simplifying along the way, and make it "
+            "easier to understand. In the event that you encounter a "
+            "mathematical expression, it is essential that you verbalize it in "
+            "straightforward nonlatex terms, while remaining accurate, and "
+            "in order to ensure that the reader can grasp the equation's "
+            "meaning solely through your verbalization. Do not output any long "
+            "latex expressions, summarize them in words."
+        )
+        human_message = (
+            "The text must be written in the first person plural point of view. Do not use long latex "
+            "expressions, paraphrase them or summarize in words. Be as faithful to the given text as "
+            "possible. Below is the section of the paper, requiring paraphrasing and simplification "
+            f' and it is indicated by double angle brackets <<{curr_upto_upto4k}>>. Start with "In this '
+            'section, we" and continue in first person plural point of view.'
         )
 
-        smry, smry_fakepagemap_section = self.generate_summary(curr_upto_upto4k) if self.include_summary else ("", [])
-
-        return {
-            "addedtext": addedtext,
-            "smry": smry,
-            "gptpagemap_section": gptpagemap_section,
-            "smry_fakepagemap_section": smry_fakepagemap_section,
-            "textpagemap_section": textpagemap_section,
-            "verbalizer_step": [" ".join(curr_upd), gpttext],
-        }
-
-    def prepare_messages(self, curr_upto_upto4k):
-        sys_message_func = "You are an ArXiv paper audio paraphraser..."
-        human_message = f"The text must be written in the first person plural point of view... <<{curr_upto_upto4k}>>."
-        sectionName = self.extract_section_name(curr_upto_upto4k)
         return [
             {"role": "system", "content": sys_message_func},
             {"role": "user", "content": human_message},
-        ], sectionName
+        ]
+
+    def prepare_summary_messages(self, curr_upto_upto4k) -> list[dict[str, str]]:
+        sys_message = (
+            "As an AI specializing in summarizing ArXiv paper sections, your main task is to distill complex "
+            "scientific concepts from a given section of a paper into 2-3 simple, yet substantial, "
+            "sentences. Retain key information, deliver the core idea, and ensure the summary is easy "
+            "to understand, while not losing the main essence of the content. "
+        )
+
+        human_message = (
+            "Below is the section that needs to be summarized in at most 2-3 sentences and it is "
+            f'indicated by double angle brackets <<{curr_upto_upto4k}>>. Start with "In this '
+            'section, we" and continue in first person plural point of view.'
+        )
+        messages = [{"role": "system", "content": sys_message}, {"role": "user", "content": human_message}]
+        return messages
 
     def extract_section_name(self, text):
         result = re.search(r"###(.*?)###", text)
@@ -139,50 +221,18 @@ class Verbalizer:
             sectionName = ""
         return sectionName
 
-    def get_gpt_text(self, messages):
-        for i in range(3):
-            try:
-                response = self.llm_api(model=self.llm_strong, messages=messages, temperature=0)
-                gpttext = response.choices[0].message.content
-                num_input_tokens = response.usage.prompt_tokens
-                num_output_tokens = response.usage.completion_tokens
-                break
-            except:
-                time.sleep(5)
-        else:
-            raise Exception(f"{self.llm_strong} failed")
-
-        return gpttext, num_input_tokens, num_output_tokens
-
-    def finalize_text(self, gpttext, curr_upd, page_inds, sectionName):
-        gpttext = self.clean_text(gpttext)
-        addedtext = f" Section: {sectionName}. " + gpttext + " "
-        gptpagemap_section, textpagemap_section = map_gpttext_to_text(addedtext, curr_upd, page_inds, self.matcher)
-        return addedtext, gptpagemap_section, textpagemap_section
+    def get_gpt_text(self, messages: list[dict[str, str]], model: str) -> tuple[str, int, int]:
+        response = self.llm_api(model=model, messages=messages, temperature=0)
+        gpttext = response.choices[0].message.content
+        num_input_tokens = response.usage.prompt_tokens
+        num_output_tokens = response.usage.completion_tokens
+        return self.clean_text(gpttext), num_input_tokens, num_output_tokens
 
     def clean_text(self, text):
         text = text.replace("$", "").replace("```", "").replace("<<", "").replace(">>", "").replace("**", "")
         text = re.sub(r"\b\w*__\w*\b", "", text)
         text = re.sub("\n+", "\n", text)
         return text
-
-    def generate_summary(self, curr_upto_upto4k):
-        sys_message = "As an AI specializing in summarizing ArXiv paper sections..."
-        human_message = f"Below is the section that needs to be summarized... <<{curr_upto_upto4k}>>."
-        messages = [{"role": "system", "content": sys_message}, {"role": "user", "content": human_message}]
-        for i in range(3):
-            try:
-                response = self.llm_api(model=self.llm_base, messages=messages, temperature=0)
-                summary = response.choices[0].message.content
-                break
-            except:
-                time.sleep(5)
-        else:
-            raise Exception(f"{self.llm_base} failed")
-        summary = self.clean_text(summary)
-        smry = " Section Summary: " + summary + " "
-        smry_fakepagemap_section = [-1] * len(sent_tokenize(smry))
-        return smry, smry_fakepagemap_section
 
 
 class DocumentProcessor:
@@ -192,6 +242,7 @@ class DocumentProcessor:
         self.tts_client = None
         self.logging = None
         self.gdrive_client = None
+        self.misc_files = []
 
         self.setup_logging(args)
 
@@ -205,6 +256,11 @@ class DocumentProcessor:
 
         openai.api_key = self.args.openai_key
         self.llm_api = openai.chat.completions.create
+
+    def pickle_dump(self, data, filename):
+        with open(filename, "wb") as f:
+            pickle.dump(data, f)
+            self.misc_files.append(filename)
 
     def setup_logging(self, args) -> None:
         if args.verbose == "debug":
@@ -230,9 +286,10 @@ class DocumentProcessor:
         else:
             raise Exception("No main source file found")
 
-        return main_file
+        return main_file, self.files_dir
 
     def process_html(self, main_file) -> tuple[str, str, str]:
+        assert self.files_dir is not None
         html_parser = "latex2html" if self.args.l2h else "latexmlc"
         display = "> /dev/null 2>&1" if self.args.verbose != "debug" else ""
 
@@ -299,6 +356,9 @@ class DocumentProcessor:
             matcher,
             "> /dev/null 2>&1",
         )
+
+        self.pickle_dump(pagemap, os.path.join(self.files_dir, "map_pagemap.pkl"))
+        self.pickle_dump(pageblockmap, os.path.join(self.files_dir, "map_pageblockmap.pkl"))
 
         with open(os.path.join(self.files_dir, "block_coords.pkl"), "wb") as f:
             pickle.dump(coords, f)
@@ -726,35 +786,75 @@ args = argparse.Namespace(
 
 def test():
     # read text and pageblockmap from file
-    with open("verbalizer_text.txt", "r") as f:
+    with open(".temp/1706.03762_files/extracted_orig_text_clean.txt", "r") as f:
         text = f.read()
-    with open("verbalizer_pageblockmap.pkl", "rb") as f:
+    with open(".temp/1706.03762_files/map_pageblockmap.pkl", "rb") as f:
         pageblockmap = pickle.load(f)
 
-    with open("process_sections.pkl", "rb") as f:
-        results = pickle.load(f)
+    # with open(".temp/test_process_sections.pkl", "rb") as f:
+    #   results = pickle.load(f)
+
+    from unittest.mock import Mock
+    import logging
+    from map.utils import Matcher
+    from pprint import pprint
+    from itertools import groupby
+    from operator import itemgetter
+
+    def mock_llm_api(*args, **kwargs):
+        replace = [
+            "The text must be written in the first person plural point of view. Do not use long latex",
+            "expressions, paraphrase them or summarize in words. Be as faithful to the given text as",
+            "possible. Below is the section of the paper, requiring paraphrasing and simplification",
+            "and it is indicated by double angle brackets <<",
+            ">>. Start with 'In this section, we' and continue in first person plural point of view.",
+        ]
+
+        # Create the mock response
+        mock_response = Mock()
+
+        # Mock the choices[0].message.content
+        choice_mock = Mock()
+        messages = kwargs.get("messages", [])
+        combined_message = messages[-1]["content"]
+
+        for r in replace:
+            combined_message = combined_message.replace(r, "")
+
+        choice_mock.content = combined_message
+        mock_response.choices = [Mock(message=choice_mock)]
+
+        # Mock the usage.prompt_tokens and usage.completion_tokens
+        usage_mock = Mock()
+        usage_mock.prompt_tokens = len(combined_message.split())
+        usage_mock.completion_tokens = len(combined_message.split())
+        mock_response.usage = usage_mock
+
+        return mock_response
 
     verbalizer = Verbalizer(args, Matcher(args.cache_dir), logging)
-    # sections, pagemap_sections = verbalizer.get_sections(text, pageblockmap)
-    # print(sections, pagemap_sections)
+    verbalizer.llm_strong = "gpt-3.5-turbo-0125"
+    verbalizer.llm_base = "gpt-3.5-turbo-0125"
+    verbalizer.llm_api = mock_llm_api
+    message_batches = list(verbalizer.generate_messages(text, pageblockmap))
+    # pprint(message_batches)
+
+    gpt_responses = verbalizer.get_gpt_responses(message_batches)
+
+    gpttext, gptpagemap, verbalizer_steps, textpagemap = verbalizer.process_results(gpt_responses)
+
+    pprint(gptpagemap)
+    pprint(textpagemap)
 
     # results = [verbalizer.process_section(sec, pagemap_sections[i]) for i, sec in enumerate(sections)]
 
-    # # save results
-    # with open("process_sections.pkl", "wb") as f:
-    #     pickle.dump(results, f)
+    # save results
+    # with open(".temp/test_process_sections.pkl", "wb") as f:
+    #   pickle.dump(results, f)
 
-    gpttext, gptpagemap, verbalizer_steps, textpagemap = verbalizer.process_results(results)
+    # gpttext, gptpagemap, verbalizer_steps, textpagemap = verbalizer.process_results(results)
 
-    for si, s in enumerate(verbalizer_steps):
-        print(type(s[0]), type(s[1]))
+    # pprint(gptpagemap)
+    # pprint(textpagemap)
 
-        print(f"===Original {si}===\n\n")
-        print(s[0])
-        print("\n\n")
-        print(f"===GPT {si}===\n\n")
-        print(s[1])
-        print("\n\n")
-
-
-#test()
+# test()

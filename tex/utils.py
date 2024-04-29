@@ -17,8 +17,8 @@ def remove_oldfiles_samepaper(paper_id):
         shutil.rmtree(files_path)
 
 
-def download_paper(paper_id):
-    files_dir = os.path.join(WORKING_DIRECTORY, f"{paper_id}_files")
+def download_paper(paper_id, dir = WORKING_DIRECTORY):
+    files_dir = os.path.join(dir, f"{paper_id}_files")
     os.makedirs(files_dir, exist_ok=True)
     file = wget.download(f"https://arxiv.org/e-print/{paper_id}", out=files_dir)
 

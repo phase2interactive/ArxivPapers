@@ -19,6 +19,9 @@ from gdrive.utils import *
 from main3 import DocumentProcessor, try_decorator, list_files, Verbalizer
 import random
 from pathlib import Path
+import itertools
+from itertools import groupby
+from pprint import pprint
 
 volume = Volume.from_name("arxiv-volume", create_if_missing=True)
 VOLUME_PATH = "/root/shared"
@@ -192,10 +195,6 @@ class ArxivVideo:
     def download_and_zip(self, paperid: str):
         import shutil
         volume_path = f"{VOLUME_PATH}/{paperid}/{paperid}.zip"
-
-        processor = DocumentProcessor(self.args)
-
-        # zip_file = processor.main_threaded()
         zip_file = self.get_zip()
 
         # copy zip_file to shared volume
@@ -253,11 +252,17 @@ class ArxivVideo:
         verbalizer = Verbalizer(self.args, Matcher(self.args.cache_dir), logging)
         return verbalizer.process_section(sec, pagemap_section)
 
+    @method()
+    def get_gpt_text(self, i, message_batch, model: str, message_type: str) -> tuple[Any, str, str]:
+        verbalizer = Verbalizer(self.args, Matcher(self.args.cache_dir), logging)
+        gpt_text, _, _ = verbalizer.get_gpt_text(message_batch, model)
+        return i, gpt_text, message_type
+
     def get_zip(self):
         processor = DocumentProcessor(self.args)
         args = self.args
         print(" ==== LATEX =============================================")
-        main_file = processor.process_latex()
+        main_file, _ = processor.process_latex()
         print(" ==== HTML ==============================================")
         title, text, abstract = processor.process_html(main_file)
         # if self.args.extract_text_only:
@@ -273,12 +278,33 @@ class ArxivVideo:
             def create_video() -> dict[str, Any]:
                 print(" ==== create_video ==============================================")
                 verbalizer = Verbalizer(args, Matcher(args.cache_dir), logging)
-                sections, pagemap_sections = verbalizer.get_sections(text, pageblockmap)
 
-                map_args = [(sec, pagemap_sections[i]) for i, sec in enumerate(sections)]
-                results = list(self.verbalize_section.starmap(map_args))
+                # generate requests for llm
+                message_batches = list(verbalizer.generate_messages(text, pageblockmap))
 
-                gpttext, gptpagemap, verbalizer_steps, textpagemap = verbalizer.process_results(results)
+                # build args for the get_gpt_text function
+                star_args = [
+                    (i, batch, model, t)
+                    for i, (batches, _, _, _, _) in enumerate(message_batches)
+                    for batch, model, t in batches
+                ]
+
+                # process all the gpt requests in parallel
+                llm_responses = list(self.get_gpt_text.starmap(star_args))
+                llm_responses.sort(key=lambda x: x[0])
+
+                # Group llm_responses by i using itertools
+                grouped_responses = itertools.groupby(llm_responses, key=lambda x: x[0])
+                # grouped_responses.sort(key=lambda x: x[0])
+
+                matched_responses = []
+                for i, responses in grouped_responses:
+                    # Process the responses for each group
+                    _, sectionName, _, curr_upd, page_inds = message_batches[i]
+                    llm_texts = [(t, llm_text) for _, llm_text, t in responses]
+                    matched_responses.append((sectionName, curr_upd, page_inds, llm_texts))
+
+                gpttext, gptpagemap, verbalizer_steps, textpagemap = verbalizer.process_results(matched_responses)
 
                 with open(os.path.join(processor.files_dir, "gptpagemap.pkl"), "wb") as f:
                     pickle.dump(gptpagemap, f)
@@ -625,40 +651,89 @@ def test():
 
     video_args = argparse.Namespace(paperid=paperid, gs="gs", ffmpeg="ffmpeg", ffprobe="ffprobe")
 
+    ax = ArxivVideo(args, video_args)
+
     with open(f".temp/{paperid}_files/gpt_text.txt", "r") as f:
         tx = f.read()
 
     with open(f".temp/{paperid}_files/gptpagemap.pkl", "rb") as f:
         pagemap = pickle.load(f)
 
-    def get_speech_blocks_for_video(text, pageblockmap):
+    def get_speech_blocks_for_video_2(text, pageblockmap):
+        pprint(pageblockmap)
         splits = sent_tokenize(text)
 
         assert len(pageblockmap) == len(splits), "Number of pageblockmap does not match number of splits"
 
-        block_text = []
-        prev = pageblockmap[0]
-        last_page = 0
-
-        for ind, m in enumerate(pageblockmap):
-            if m == prev:
-                block_text.append(splits[ind])
-                continue
-
+        for key, group in groupby(enumerate(splits), key=lambda x: pageblockmap[x[0]]):
+            block_text = [text for i, text in group]
             joinedtext = " ".join(block_text)
-            if isinstance(prev, list):
-                last_page = prev[1]
-                yield joinedtext, prev[1], prev[2]
+            if isinstance(key, list):
+                yield joinedtext, key[1], key[2]
             else:
-                yield joinedtext, last_page, None
+                yield joinedtext, 0, None
 
-            prev = m
-            block_text = [splits[ind]]
-
-    speech = list(get_speech_blocks_for_video(tx, pagemap))
+    speech = list(ax.get_speech_blocks_for_video(tx, pagemap))
     for t, page, block in speech:
         # print the first 10 chars of text
         print(f"text:{t[:10]} page: {page}, block: {block}")
 
 
-test()
+def test2():
+    with open(".temp/1706.03762_files/extracted_orig_text_clean.txt", "r") as f:
+        text = f.read()
+
+    with open(".temp/1706.03762_files/map_pageblockmap.pkl", "rb") as f:
+        pageblockmap = pickle.load(f)
+
+    from unittest.mock import Mock
+    import logging
+    from map.utils import Matcher
+    from pprint import pprint
+    from nltk.tokenize import sent_tokenize
+
+    def mock_llm_api(*args, **kwargs):
+        # Create the mock response
+        mock_response = Mock()
+
+        # Mock the choices[0].message.content
+        choice_mock = Mock()
+        messages = kwargs.get("messages", [])
+        combined_message = messages[-1]["content"]
+        combined_message = combined_message.replace(
+            "Below is the section that needs to be summarized in at most 2-3 sentences and it is", " "
+        )
+        combined_message = combined_message.replace("indicated by double angle brackets <<", " ")
+        combined_message = combined_message.replace('>>. Start with "In this', " ")
+        combined_message = combined_message.replace(
+            'section, we" and continue in first person plural point of view.', " "
+        )
+
+        choice_mock.content = combined_message
+        mock_response.choices = [Mock(message=choice_mock)]
+
+        # Mock the usage.prompt_tokens and usage.completion_tokens
+        usage_mock = Mock()
+        usage_mock.prompt_tokens = len(combined_message.split())
+        usage_mock.completion_tokens = len(combined_message.split())
+        mock_response.usage = usage_mock
+
+        return mock_response
+
+    gpttext, gptpagemap, verbalizer_steps, textpagemap = gpt_textvideo_verbalizer(
+        text,
+        mock_llm_api,  # openai.chat.completions.create,
+        "gpt-3.5-turbo-0125",
+        "gpt-3.5-turbo-0125",
+        False,
+        True,
+        pageblockmap,
+        Matcher(cache_dir="cache"),
+        logging,
+    )
+
+    pprint(gptpagemap)
+    pprint(textpagemap)
+
+
+# test2()
