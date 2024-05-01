@@ -22,6 +22,7 @@ from pathlib import Path
 import itertools
 from itertools import groupby
 from pprint import pprint
+from datetime import datetime
 
 volume = Volume.from_name("arxiv-volume", create_if_missing=True)
 VOLUME_PATH = "/root/shared"
@@ -95,6 +96,9 @@ class ArxivVideo:
     def __init__(self, args: argparse.Namespace, video_args):
         self.args = args
         self.video_args = video_args
+
+        # get a unique value based on the current time
+        self.run_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
 
     # @build()  # add another step to the image build
     def builder(self):
@@ -208,7 +212,10 @@ class ArxivVideo:
     def get_speech_blocks_for_video(self, text, pageblockmap):
         splits = sent_tokenize(text)
 
-        assert len(pageblockmap) == len(splits), "Number of pageblockmap does not match number of splits"
+        # assert len(pageblockmap) == len(splits), "Number of pageblockmap does not match number of splits"
+
+        if len(pageblockmap) == len(splits):
+            logging.warning(f"Number of pageblockmap does not match number of splits {len(pageblockmap)} {len(splits)}")
 
         block_text = []
         prev = pageblockmap[0]
@@ -262,13 +269,16 @@ class ArxivVideo:
         processor = DocumentProcessor(self.args)
         args = self.args
         print(" ==== LATEX =============================================")
-        main_file, _ = processor.process_latex()
+        main_file, files_dir = processor.process_latex()
         print(" ==== HTML ==============================================")
         title, text, abstract = processor.process_html(main_file)
         # if self.args.extract_text_only:
         #    return None
-        print(" ==== MAP ==============================================")
-        _, pageblockmap = processor.process_map(main_file, text)
+        print(" ==== MAP ================================================")
+        _, pageblockmap = self.process_map(main_file, files_dir, text)
+
+        # shutil.copytree(files_dir, Path(VOLUME_PATH) / Path(self.run_id))
+        # volume.commit()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
 
@@ -427,7 +437,7 @@ class ArxivVideo:
 
         final_audio = os.path.join(processor.files_dir, f"{processor.args.final_audio_file}.mp3")
         os.system(
-            f"{processor.args.ffmpeg} -f concat -i {os.path.join(processor.files_dir, processor.args.chunk_mp3_file_list)} -c copy {final_audio} > /dev/null 2>&1"
+            f"{processor.args.ffmpeg} -f concat -i {os.path.join(processor.files_dir, processor.args.chunk_mp3_file_list)} -c copy {final_audio}"
         )
         processor.logging.info("Created audio file")
 
@@ -437,8 +447,113 @@ class ArxivVideo:
 
         return processor.process_zip(main_file)
 
+    def process_map(self, main_file, files_dir, text) -> tuple[None, None] | tuple[list[int], list]:
+        if not self.args.create_video:
+            return None, None
+
+        matcher = Matcher(self.args.cache_dir)
+
+        logging.info("Mapping text to pages")
+        pdf_file = f"{os.path.join(files_dir, main_file)}.pdf"
+        print(pdf_file)
+        pagemap = map_text_to_pdfpages(text, pdf_file, matcher)
+
+        logging.info("Mapping pages to blocks")
+
+        splits = sent_tokenize(text)
+        pageblockmap = []
+        coords = []
+
+        with open(pdf_file, "rb") as f:
+            pdf_bytes = f.read()
+
+        star_args = [(i, pg_num, pagemap, splits, matcher, pdf_bytes) for i, pg_num in enumerate(np.unique(pagemap))]
+
+        results = list(self.process_page.starmap(star_args))
+        results.sort(key=lambda x: x[0])
+
+        print(f"Done processing {len(results)} pages")
+
+        for i, p, smoothed_seq, good_coords in results:
+            page_pdf = f"{os.path.join(files_dir, str(p))}.pdf"
+            page_png = f"{os.path.join(files_dir, str(p))}.png"
+
+            os.system(
+                f"{self.args.gs} -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={p + 1} -dLastPage={p + 1} -sOutputFile={page_pdf} {pdf_file}"
+            )
+            os.system(f"{self.args.gs} -sDEVICE=png16m -r400 -o {page_png} {page_pdf}")
+            pageblockmap += [[i, p, s] for s in smoothed_seq]
+            coords.append(good_coords)
+
+        # self.pickle_dump(pagemap, os.path.join(self.files_dir, "map_pagemap.pkl"))
+        # self.pickle_dump(pageblockmap, os.path.join(self.files_dir, "map_pageblockmap.pkl"))
+
+        with open(os.path.join(files_dir, "block_coords.pkl"), "wb") as f:
+            pickle.dump(coords, f)
+
+        with open(os.path.join(files_dir, "original_text_split_pages.txt"), "w") as f:
+            splits = sent_tokenize(text)
+
+            for i, p in enumerate(np.unique(pagemap)):
+                start = np.where(np.array(pagemap) == p)[0][0]
+                end = np.where(np.array(pagemap) == p)[0][-1] + 1
+                chunk_text = " ".join(splits[start:end])
+                f.write(f"PAGE {p + 1}\n\n")
+                f.write(chunk_text)
+                f.write("\n\n")
+
+        return pagemap, pageblockmap
+
     @method()
-    def process_line_f(self, i, line):
+    def process_page(self, i, pg_num, pagemap, splits, matcher, pdf_bytes) -> list[int]:
+        print("------ process_page", i, pg_num)
+        files_dir = f".temp/{self.args.paperid}_files"
+        pdf_file = os.path.join(files_dir, "main.pdf")
+        os.makedirs(files_dir, exist_ok=True)
+
+        with open(pdf_file, "wb") as f:
+            f.write(pdf_bytes)
+
+        page_pdf = f"{os.path.join(files_dir, str(pg_num))}.pdf"
+        page_png = f"{os.path.join(files_dir, str(pg_num))}.png"
+
+        os.system(
+            f"{self.args.gs} -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={pg_num + 1} -dLastPage={pg_num + 1} -sOutputFile={page_pdf} {pdf_file}"
+        )
+
+        doc = fitz.open(page_pdf)
+        page = doc[0]
+
+        blocks = page.get_text("blocks")
+        good_blocks = []
+        good_coords = []
+        for b in blocks:
+            if len(b[4]) > 0:
+                good_blocks.append(b[4])
+                good_coords.append(list(b[:4]))
+
+        start = np.where(np.array(pagemap) == pg_num)[0][0]
+        end = np.where(np.array(pagemap) == pg_num)[0][-1] + 1
+        page_text_splits = splits[start:end]
+
+        seq = matcher.match(
+            page_text_splits,
+            good_blocks,
+            bert=True,
+            minilm=True,
+            fuzz=True,
+            spacy=True,
+            diff=True,
+            tfidf=True,
+            pnt=True,
+        )
+
+        smoothed_seq = smooth_sequence(seq)
+
+        return i, pg_num, smoothed_seq, good_coords
+
+    @method()
+    def process_line_f(self, i, line) -> tuple[int, str, bytes, Exception]:
 
         block_coords = pickle.load(open(os.path.join(self.dr, "block_coords.pkl"), "rb"))
         gptpagemap = pickle.load(open(os.path.join(self.dr, "gptpagemap.pkl"), "rb"))
@@ -454,7 +569,7 @@ class ArxivVideo:
         return i, mp4_file, data, ex
 
     @method()
-    def process_short_line_f(self, i, line, page_num):
+    def process_short_line_f(self, i, line, page_num) -> tuple[int, str, bytes, None]:
         i, mp4_file, _, ex = process_short_line(i, line, page_num, self.dr, self.video_args)
 
         if ex:
@@ -545,17 +660,42 @@ class ArxivVideo:
         return f"{args.ffmpeg} -f concat -i {mp4_list} -y -c copy {mp4_output}", mp4_output
 
     @method()
+    def run_zip(self, paperid, video_types=["long"]) -> tuple[dict[str, bytes], bytes]:
+        zip_file = self.download_and_zip.remote(paperid)
+        volume.reload()
+        zip_data = open(zip_file, "rb").read()
+
+        videos = {}
+
+        # volume.delete_file(zip_file)
+        return videos, zip_data
+
+    @method()
     def run(self, paperid, video_types=["long"]) -> tuple[dict[str, bytes], bytes]:
 
         zip_file = self.download_and_zip.remote(paperid)
         volume.reload()
-        # zip_file = f"{VOLUME_PATH}/{paperid}/{paperid}.zip"
         zip_data = open(zip_file, "rb").read()
-        # results = list(self.makevideo.map(video_types))
+        results = list(self.makevideo.map(video_types))
 
         videos = {}
-        # for data, video_type in results:
-        #   videos[video_type] = data
+        for data, video_type in results:
+            videos[video_type] = data
+
+        # volume.delete_file(zip_file)
+        return videos, zip_data
+
+    @method()
+    def make_video(self, paperid, video_types=["long"]) -> tuple[dict[str, bytes], bytes]:
+
+        volume.reload()
+        zip_file = f"{VOLUME_PATH}/{paperid}/{paperid}.zip"
+        zip_data = open(zip_file, "rb").read()
+        results = list(self.makevideo.map(video_types))
+
+        videos = {}
+        for data, video_type in results:
+            videos[video_type] = data
 
         # volume.delete_file(zip_file)
         return videos, zip_data
@@ -594,8 +734,8 @@ def main():
         create_short=True,
         create_qa=False,
         create_audio_simple=False,
-        llm_strong="gpt-4-0125-preview",
-        llm_base="gpt-4-0125-preview",
+        llm_strong="gpt-3.5-turbo-0125",  # "gpt-4-0125-preview",
+        llm_base="gpt-3.5-turbo-0125",  # "gpt-4-0125-preview",
         openai_key=os.environ.get("OPENAI_API_KEY", ""),
         tts_client="openai",
     )
@@ -604,7 +744,7 @@ def main():
 
     arx = ArxivVideo(args, video_args)
 
-    images, zip = arx.run.remote(paperid, ["long", "short"])
+    images, zip = arx.run_zip.remote(paperid, ["long", "short"])
 
     zip_file = f".temp/{paperid}/{paperid}.zip"
     os.makedirs(os.path.dirname(zip_file), exist_ok=True)

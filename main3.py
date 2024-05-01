@@ -7,6 +7,8 @@ import random
 import shutil
 import concurrent.futures
 from typing import Any
+import random
+from pprint import pprint
 
 import numpy as np
 import openai
@@ -19,7 +21,6 @@ from gpt.utils import *
 from speech.utils import *
 from zip.utils import *
 from gdrive.utils import *
-import random
 
 
 def list_files(startpath):
