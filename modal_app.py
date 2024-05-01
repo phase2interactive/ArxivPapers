@@ -212,10 +212,7 @@ class ArxivVideo:
     def get_speech_blocks_for_video(self, text, pageblockmap):
         splits = sent_tokenize(text)
 
-        # assert len(pageblockmap) == len(splits), "Number of pageblockmap does not match number of splits"
-
-        if len(pageblockmap) == len(splits):
-            logging.warning(f"Number of pageblockmap does not match number of splits {len(pageblockmap)} {len(splits)}")
+        assert len(pageblockmap) == len(splits), "Number of pageblockmap does not match number of splits"
 
         block_text = []
         prev = pageblockmap[0]
