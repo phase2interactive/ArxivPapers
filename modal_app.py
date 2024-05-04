@@ -16,7 +16,7 @@ from gpt.utils import *
 from speech.utils import *
 from zip.utils import *
 from gdrive.utils import *
-from main3 import DocumentProcessor, try_decorator, list_files, Verbalizer
+from main3 import DocumentProcessor, try_decorator, list_files, Verbalizer, VerbalizerShort, mock_llm_api
 import random
 from pathlib import Path
 import itertools
@@ -99,6 +99,8 @@ class ArxivVideo:
 
         # get a unique value based on the current time
         self.run_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        if args.gdrive_id:
+            self.gdrive_client = GDrive(args.gdrive_id)
 
     # @build()  # add another step to the image build
     def builder(self):
@@ -212,7 +214,7 @@ class ArxivVideo:
     def get_speech_blocks_for_video(self, text, pageblockmap):
         splits = sent_tokenize(text)
 
-        assert len(pageblockmap) == len(splits), "Number of pageblockmap does not match number of splits"
+        assert len(pageblockmap) == len(splits), f"pageblock splits mismatch {len(pageblockmap)} :  {len(splits)}"
 
         block_text = []
         prev = pageblockmap[0]
@@ -233,14 +235,18 @@ class ArxivVideo:
             prev = m
             block_text = [splits[ind]]
 
-    @method()
-    def text_to_speech(self, text, page=None, block=None) -> tuple[bytes, str]:
-        processor = DocumentProcessor(self.args)
-
-        if block is None:
-            chunk_audio_file_name = f"page{page}summary_{hash(text)}.mp3"
+    def get_mp3_name(self, text, page=None, block=None):
+        h = hash(text)
+        if page is None and block is None:
+            return f"short_{h}.mp3"
+        elif block is None:
+            return f"page{page}summary_{h}.mp3"
         else:
-            chunk_audio_file_name = f"page{page}block{block}_{hash(text)}.mp3"
+            return f"page{page}block{block}_{h}.mp3"
+
+    @method()
+    def text_to_speech(self, text, chunk_audio_file_name) -> tuple[bytes, str]:
+        processor = DocumentProcessor(self.args)
 
         audio, file_path = processor.tts_client.synthesize_speech(
             text, self.args.voice, 1.0, ".", chunk_audio_file_name
@@ -249,7 +255,7 @@ class ArxivVideo:
         assert audio is not None, "Audio is None"
         assert file_path is not None, "File path is None"
 
-        return audio, chunk_audio_file_name
+        return audio, chunk_audio_file_name, text
 
     @method()
     def verbalize_section(self, sec, pagemap_section):
@@ -337,9 +343,11 @@ class ArxivVideo:
                     # print the first 10 chars of text
                     print(f"text:{t[:10]} page: {page}, block: {block}")
 
-                results = list(self.text_to_speech.starmap(speech))
+                file_names = [(t, self.get_mp3_name(t, page, block)) for t, page, block in speech]
+
+                results = list(self.text_to_speech.starmap(file_names))
                 with open(os.path.join(processor.files_dir, self.args.chunk_mp3_file_list), "w") as mp3_list_file:
-                    for audio_data, chunk_audio_file_name in results:
+                    for audio_data, chunk_audio_file_name, _ in results:
                         mp3_file = os.path.join(processor.files_dir, os.path.basename(chunk_audio_file_name))
                         with open(mp3_file, "wb") as f:
                             f.write(audio_data)
@@ -363,10 +371,24 @@ class ArxivVideo:
                 with open(os.path.join(processor.files_dir, "gpt_text_short.txt"), "w") as f:
                     f.write(gpttext_short)
 
-                with open("gpt_slides_short.json", "w") as json_file:
+                with open(os.path.join(processor.files_dir, "gpt_slides_short.json"), "w") as json_file:
                     json.dump(slides_short, json_file, indent=4)
 
-                processor.process_short_speech(gpttext_short, slides_short, title)
+                print(slides_short)
+
+                tts = VerbalizerShort(args, files_dir, logging)
+                messages = tts.generate_messages(gpttext_short, slides_short["slides"])
+
+                star_args = [(m, self.get_mp3_name(m, None, None)) for m in messages]
+
+                results = list(self.text_to_speech.starmap(star_args))
+
+                _, final_audio_short = tts.process_files(results, slides_short)
+
+                if self.args.gdrive_id:
+                    self.gdrive_client.upload_audio(f"[short] {title}", f"{final_audio_short}")
+                    self.logging.info("Uploaded short audio to GDrive")
+
                 return {"gpttext_short": gpttext_short, "gptslides_short": slides_short["slides"]}
 
             @try_decorator
@@ -476,9 +498,9 @@ class ArxivVideo:
             page_png = f"{os.path.join(files_dir, str(p))}.png"
 
             os.system(
-                f"{self.args.gs} -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={p + 1} -dLastPage={p + 1} -sOutputFile={page_pdf} {pdf_file}"
+                f"{self.args.gs} -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={p + 1} -dLastPage={p + 1} -sOutputFile={page_pdf} {pdf_file} > /dev/null 2>&1"
             )
-            os.system(f"{self.args.gs} -sDEVICE=png16m -r400 -o {page_png} {page_pdf}")
+            os.system(f"{self.args.gs} -sDEVICE=png16m -r400 -o {page_png} {page_pdf} > /dev/null 2>&1")
             pageblockmap += [[i, p, s] for s in smoothed_seq]
             coords.append(good_coords)
 
@@ -515,7 +537,7 @@ class ArxivVideo:
         page_png = f"{os.path.join(files_dir, str(pg_num))}.png"
 
         os.system(
-            f"{self.args.gs} -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={pg_num + 1} -dLastPage={pg_num + 1} -sOutputFile={page_pdf} {pdf_file}"
+            f"{self.args.gs} -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={pg_num + 1} -dLastPage={pg_num + 1} -sOutputFile={page_pdf} {pdf_file} > /dev/null 2>&1"
         )
 
         doc = fitz.open(page_pdf)
@@ -720,7 +742,7 @@ def main():
         ffmpeg="ffmpeg",
         gs="gs",
         cache_dir="cache",
-        gdrive_id="",
+        gdrive_id=None,
         voice="onyx",
         final_audio_file="final_audio",
         chunk_mp3_file_list="mp3_list.txt",
@@ -731,7 +753,7 @@ def main():
         create_short=True,
         create_qa=False,
         create_audio_simple=False,
-        llm_strong="gpt-3.5-turbo-0125",  # "gpt-4-0125-preview",
+        llm_strong="gpt-4-0125-preview",
         llm_base="gpt-3.5-turbo-0125",  # "gpt-4-0125-preview",
         openai_key=os.environ.get("OPENAI_API_KEY", ""),
         tts_client="openai",
@@ -741,7 +763,7 @@ def main():
 
     arx = ArxivVideo(args, video_args)
 
-    images, zip = arx.run_zip.remote(paperid, ["long", "short"])
+    images, zip = arx.make_video.remote(paperid, ["long", "short"])
 
     zip_file = f".temp/{paperid}/{paperid}.zip"
     os.makedirs(os.path.dirname(zip_file), exist_ok=True)
@@ -786,6 +808,9 @@ def test():
         tts_client="openai",
     )
 
+    v = VerbalizerShort(args, ".temp", logging)
+    print(v.files_dir)
+
     video_args = argparse.Namespace(paperid=paperid, gs="gs", ffmpeg="ffmpeg", ffprobe="ffprobe")
 
     ax = ArxivVideo(args, video_args)
@@ -795,20 +820,6 @@ def test():
 
     with open(f".temp/{paperid}_files/gptpagemap.pkl", "rb") as f:
         pagemap = pickle.load(f)
-
-    def get_speech_blocks_for_video_2(text, pageblockmap):
-        pprint(pageblockmap)
-        splits = sent_tokenize(text)
-
-        assert len(pageblockmap) == len(splits), "Number of pageblockmap does not match number of splits"
-
-        for key, group in groupby(enumerate(splits), key=lambda x: pageblockmap[x[0]]):
-            block_text = [text for i, text in group]
-            joinedtext = " ".join(block_text)
-            if isinstance(key, list):
-                yield joinedtext, key[1], key[2]
-            else:
-                yield joinedtext, 0, None
 
     speech = list(ax.get_speech_blocks_for_video(tx, pagemap))
     for t, page, block in speech:
@@ -829,34 +840,6 @@ def test2():
     from pprint import pprint
     from nltk.tokenize import sent_tokenize
 
-    def mock_llm_api(*args, **kwargs):
-        # Create the mock response
-        mock_response = Mock()
-
-        # Mock the choices[0].message.content
-        choice_mock = Mock()
-        messages = kwargs.get("messages", [])
-        combined_message = messages[-1]["content"]
-        combined_message = combined_message.replace(
-            "Below is the section that needs to be summarized in at most 2-3 sentences and it is", " "
-        )
-        combined_message = combined_message.replace("indicated by double angle brackets <<", " ")
-        combined_message = combined_message.replace('>>. Start with "In this', " ")
-        combined_message = combined_message.replace(
-            'section, we" and continue in first person plural point of view.', " "
-        )
-
-        choice_mock.content = combined_message
-        mock_response.choices = [Mock(message=choice_mock)]
-
-        # Mock the usage.prompt_tokens and usage.completion_tokens
-        usage_mock = Mock()
-        usage_mock.prompt_tokens = len(combined_message.split())
-        usage_mock.completion_tokens = len(combined_message.split())
-        mock_response.usage = usage_mock
-
-        return mock_response
-
     gpttext, gptpagemap, verbalizer_steps, textpagemap = gpt_textvideo_verbalizer(
         text,
         mock_llm_api,  # openai.chat.completions.create,
@@ -870,7 +853,9 @@ def test2():
     )
 
     pprint(gptpagemap)
-    pprint(textpagemap)
+    # pprint(textpagemap)
+    print(len(gptpagemap))
+    print(len(sent_tokenize(gpttext)))
 
-
+# test()
 # test2()

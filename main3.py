@@ -45,6 +45,66 @@ def try_decorator(func):
     return wrapper
 
 
+class VerbalizerShort:
+
+    def __init__(self, args, files_dir, logging):
+        self.args = args
+        self.llm_strong = args.llm_strong
+        self.llm_base = args.llm_base
+        self.manual = args.manual_gpt
+        self.include_summary = args.include_summary
+        self.logging = logging
+        self.encoding = tiktoken.get_encoding("cl100k_base")
+        openai.api_key = args.openai_key
+        self.llm_api = openai.chat.completions.create
+        self.files_dir = files_dir
+
+    def generate_messages(self, gpttext_short: str, slides):
+        print(" --- process_short_speech --- ")
+        para = gpttext_short.split("\n\n")
+
+        if len(para) == len(slides):
+            first_para_sent = sent_tokenize(para[0])
+            para[0] = " ".join(first_para_sent[1:])
+            para.insert(0, first_para_sent[0])
+
+        yield from para
+
+    def text_to_speech(self, text):
+        audio, file_path = self.tts_client.synthesize_speech(
+            text, "Neural2-F", 1.0, self.files_dir, f"short_{hash(text)}.mp3"
+        )
+
+        logging.info(f"Processed block text: \n\n {text}")
+
+        if os.path.getsize(file_path) == 0:
+            return None
+
+        return audio, file_path, text
+
+    def process_files(self, files, slides_short) -> str:
+        print(" --- process_files --- ")
+        short_mp3_list_file = os.path.join(self.files_dir, f"shorts_{self.args.chunk_mp3_file_list}")
+        with open(short_mp3_list_file, "w") as mp3_list_file:
+            for bytes, chunk_audio, _ in files:
+                local_mp3 = os.path.join(self.files_dir, os.path.basename(chunk_audio))
+
+                if not os.path.exists(local_mp3):
+                    with open(os.path.join(self.files_dir, os.path.basename(chunk_audio)), "wb") as f:
+                        f.write(bytes)
+
+                mp3_list_file.write(f"file {os.path.basename(chunk_audio) }\n")
+
+            final_audio_short = os.path.join(self.files_dir, f"{self.args.final_audio_file}_short.mp3")
+            os.system(f"{self.args.ffmpeg} -f concat -i {short_mp3_list_file} " f"-c copy {final_audio_short}")
+
+            self.logging.info("Created short audio file")
+
+        create_slides(slides_short, os.path.join(self.files_dir, "slides"))
+
+        return short_mp3_list_file, final_audio_short
+
+
 class Verbalizer:
 
     def __init__(self, args, matcher, logging):
@@ -151,25 +211,25 @@ class Verbalizer:
                 for message_type in set(t for t, _ in gpt_response)
             }
 
-            pprint(response_by_type)
-
             # expand response_by_type by converting the value to a tuple
-            response_by_type = {k: (v, f"{prefix[k]} {v}") for k, v in response_by_type.items()}
+            response_by_type = {k: (v, f"{prefix[k]} {v} ") for k, v in response_by_type.items()}
 
             gpttext, prefixed_text = response_by_type["paraphrase"]
             gptpagemap_section, textpagemap_section = map_gpttext_to_text(
                 prefixed_text, curr_upd, page_inds, self.matcher
             )
-            smry_fakepagemap_section = [-1] * len(sent_tokenize(response_by_type["summary"][1]))
+            _, prefixed_smry = response_by_type["summary"]
+            smry_fakepagemap_section = [-1] * len(sent_tokenize(prefixed_smry))
 
-            gpttext_all += " ".join([v[1] for k, v in response_by_type.items()])
+            gpttext_all += "".join([v[1] for _, v in response_by_type.items()])
             gptpagemap += gptpagemap_section + smry_fakepagemap_section
             textpagemap += textpagemap_section + [-1]
 
             verbalizer_steps.append([" ".join(curr_upd), gpttext])
 
-            # if len(sent_tokenize(gpttext_all)) != len(gptpagemap):
-            #    raise Exception("Mismatch between generated text and page mapping after processing a section")
+            assert len(sent_tokenize(gpttext_all)) == len(gptpagemap), (
+                "text and page mapping mismatch in section " + sectionName
+            )
 
         return gpttext_all, gptpagemap, verbalizer_steps, textpagemap
 
@@ -320,6 +380,12 @@ class DocumentProcessor:
         self.logging.info(f"Section title stop words: {stop_words}")
 
         D = create_nested_dict(content, self.logging, stop_words)
+
+        with open(os.path.join(self.files_dir, "extracted_sections.json"), "w") as f:
+            json.dump(D, f, indent=4)
+
+        print(json.dumps(D, indent=4))
+
         extract_text_recursive(D, self.files_dir, main_file, citations, html_parser, html)
         text = depth_first_search(D)
 
@@ -781,8 +847,41 @@ args = argparse.Namespace(
     tts_client="openai",
 )
 
+
 # doc_processor = DocumentProcessor(args)
 # doc_processor.main_threaded()
+def mock_llm_api(*args, **kwargs):
+    from unittest.mock import Mock
+
+    replace = [
+        "The text must be written in the first person plural point of view. Do not use long latex",
+        "expressions, paraphrase them or summarize in words. Be as faithful to the given text as",
+        "possible. Below is the section of the paper, requiring paraphrasing and simplification",
+        "and it is indicated by double angle brackets <<",
+        ">>. Start with 'In this section, we' and continue in first person plural point of view.",
+    ]
+
+    # Create the mock response
+    mock_response = Mock()
+
+    # Mock the choices[0].message.content
+    choice_mock = Mock()
+    messages = kwargs.get("messages", [])
+    combined_message = messages[-1]["content"]
+
+    for r in replace:
+        combined_message = combined_message.replace(r, "")
+
+    choice_mock.content = combined_message
+    mock_response.choices = [Mock(message=choice_mock)]
+
+    # Mock the usage.prompt_tokens and usage.completion_tokens
+    usage_mock = Mock()
+    usage_mock.prompt_tokens = len(combined_message.split())
+    usage_mock.completion_tokens = len(combined_message.split())
+    mock_response.usage = usage_mock
+
+    return mock_response
 
 
 def test():
@@ -795,43 +894,11 @@ def test():
     # with open(".temp/test_process_sections.pkl", "rb") as f:
     #   results = pickle.load(f)
 
-    from unittest.mock import Mock
     import logging
     from map.utils import Matcher
     from pprint import pprint
     from itertools import groupby
     from operator import itemgetter
-
-    def mock_llm_api(*args, **kwargs):
-        replace = [
-            "The text must be written in the first person plural point of view. Do not use long latex",
-            "expressions, paraphrase them or summarize in words. Be as faithful to the given text as",
-            "possible. Below is the section of the paper, requiring paraphrasing and simplification",
-            "and it is indicated by double angle brackets <<",
-            ">>. Start with 'In this section, we' and continue in first person plural point of view.",
-        ]
-
-        # Create the mock response
-        mock_response = Mock()
-
-        # Mock the choices[0].message.content
-        choice_mock = Mock()
-        messages = kwargs.get("messages", [])
-        combined_message = messages[-1]["content"]
-
-        for r in replace:
-            combined_message = combined_message.replace(r, "")
-
-        choice_mock.content = combined_message
-        mock_response.choices = [Mock(message=choice_mock)]
-
-        # Mock the usage.prompt_tokens and usage.completion_tokens
-        usage_mock = Mock()
-        usage_mock.prompt_tokens = len(combined_message.split())
-        usage_mock.completion_tokens = len(combined_message.split())
-        mock_response.usage = usage_mock
-
-        return mock_response
 
     verbalizer = Verbalizer(args, Matcher(args.cache_dir), logging)
     verbalizer.llm_strong = "gpt-3.5-turbo-0125"
@@ -844,8 +911,11 @@ def test():
 
     gpttext, gptpagemap, verbalizer_steps, textpagemap = verbalizer.process_results(gpt_responses)
 
+    # pprint(gptpagemap)
     pprint(gptpagemap)
-    pprint(textpagemap)
+    print(len(gptpagemap))
+
+    print(len(sent_tokenize(gpttext)))
 
     # results = [verbalizer.process_section(sec, pagemap_sections[i]) for i, sec in enumerate(sections)]
 
@@ -857,5 +927,6 @@ def test():
 
     # pprint(gptpagemap)
     # pprint(textpagemap)
+
 
 # test()
