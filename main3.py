@@ -296,6 +296,120 @@ class Verbalizer:
         return text
 
 
+class QAVerbalizer:
+    def __init__(self, args, matcher, logging):
+        self.llm_strong = args.llm_strong
+        self.llm_base = args.llm_base
+        self.manual = args.manual_gpt
+        self.include_summary = args.include_summary
+        self.matcher = matcher
+        self.logging = logging
+        self.encoding = tiktoken.get_encoding("cl100k_base")
+        openai.api_key = args.openai_key
+        self.llm_api = openai.chat.completions.create
+
+    def gpt_qa_verbalizer(self, files_dir):
+
+        path = os.path.join(files_dir, "original_text_split_pages.txt")
+        with open(path) as f:
+            paper_text = f.read()
+
+        system_message = (
+            "You are a college professor, known for your expert knowledge in deep learning field. "
+            "You are also known for creating very thoughtful and probing questions that examine"
+            "the actual knowledge of a student based on their submitted paper. Your goal is to come up with "
+            "a list of questions, both on intuitive level and on deeper technical level that evaluate if "
+            "a student really knows about his or her work. Focus on the knowledge of the main proposed method, "
+            "motivation and results. Make sure your list of questions examine the student thoroughly. "
+            "Ask at least 10 different and diverse questions. "
+            "The questions must cover intuition, main idea and technical details, among others. "
+            "Be extremely specific and ask about details presented in the paper, no generic or abstract questions. "
+        )
+
+        human_message = f"Below is the student arxiv paper about which the questions needs to be asked: {paper_text}"
+
+        messages = [{"role": "system", "content": system_message}, {"role": "user", "content": human_message}]
+
+        response = self.llm_api(
+            model=self.llm_base,
+            messages=messages,
+            temperature=0,
+            functions=[
+                {
+                    "name": "ask_questions",
+                    "description": "ask questions about provided arxiv paper",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "questions": {
+                                "type": "array",
+                                "description": "the list of questions to be asked",
+                                "items": {
+                                    "type": "string",
+                                    "description": "individual question, thoughtful and revealing",
+                                },
+                            },
+                        },
+                        "required": ["questions"],
+                    },
+                }
+            ],
+            function_call="auto",
+        )
+
+        Qs = json.loads(response.choices[0].message.function_call.arguments)
+
+        system_message = (
+            "You are a student, who wrote this paper. You are on a very important exam. "
+            "You are tasked to explain your work as best as you can. "
+            "You will be provided with a text of the paper, split by pages and a question. "
+            "You must answer the question using information given in the paper. "
+            "The answer should be consice and to the point but still contain details. "
+            "And it should answer the question as best as possible. Be extremly specific. "
+            "Ground your response to the provided paper text. Do NOT use generic or abstract phrases. "
+            "Your career depends on how well you do this job. I will tip you $2000 for an excellent job done. "
+            "Make sure to answer using at least 10 (ten) sentences."
+        )
+
+        answers = []
+        pages = []
+
+        for Q in Qs["questions"]:
+            human_message = (
+                f"Here is the text of the split by pages: {paper_text}. And here is the question you need to answer: {Q}. "
+                "Make sure your answer best reflects the provided text."
+            )
+
+            messages = [{"role": "system", "content": system_message}, {"role": "user", "content": human_message}]
+
+            for i in range(3):
+                try:
+                    response = self.llm_api(model=self.llm_base, messages=messages, temperature=0)
+                    break
+                except:
+                    time.sleep(5)
+            else:
+                raise Exception(f"{self.llm_base} failed")
+
+            answer = response.choices[0].message.content
+
+            answer = answer.replace("$", "").replace("```", "").replace("<<", "").replace(">>", "").replace("**", "")
+
+            # remove words with underscores
+            answer = re.sub(r"\b\w*__\w*\b", "", answer)
+
+            answers.append(answer)
+
+            T = paper_text.split("PAGE ")
+            G = answer.split(".")
+            seq = self.matcher.match(G[:-1], T[1:], minilm=1, bert=1, fuzz=1, spacy=1, diff=1, tfidf=1, pnt=True)
+            # counts = np.bincount(seq)
+            # pages.append(np.argmax(counts))
+            pages.append(seq)
+
+        return Qs["questions"], answers, pages
+
+
 class DocumentProcessor:
     def __init__(self, args):
         self.args = args
