@@ -303,7 +303,7 @@ def process_short_line(i, line, page_num, dr, args):
         return i, "", logfile_path, e
 
 
-def prepare_tasks(dr, lines, qa_pages, args):
+def prepare_qa_tasks(dr, lines, qa_pages, args):
     tasks = []
     turn = -1
     page_num = 0
@@ -312,7 +312,7 @@ def prepare_tasks(dr, lines, qa_pages, args):
         components = line.strip().split()
         audio = components[1].replace(".mp3", "")
 
-        if "question" in audio:
+        if "question" in audio or "qa" in audio:
             turn += 1
             page_num = 0
             input_path = os.path.join(dr, "questions", f"question_{turn}")
@@ -477,7 +477,7 @@ def main(args):
         print(lines)
 
         qa_pages = pickle.load(open(os.path.join(dr, "qa_pages.pkl"), "rb"))
-        tasks = prepare_tasks(dr, lines, qa_pages)
+        tasks = prepare_qa_tasks(dr, lines, qa_pages)
         print(tasks)
 
         with Pool(8) as pool:

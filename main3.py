@@ -308,15 +308,9 @@ class QAVerbalizer:
         openai.api_key = args.openai_key
         self.llm_api = openai.chat.completions.create
 
-    def gpt_qa_verbalizer(self, files_dir):
-
-        path = os.path.join(files_dir, "original_text_split_pages.txt")
-        with open(path) as f:
-            paper_text = f.read()
-
-        system_message = (
+        self.prof_system_message = (
             "You are a college professor, known for your expert knowledge in deep learning field. "
-            "You are also known for creating very thoughtful and probing questions that examine"
+            "You are also known for creating very thoughtful and probing questions that examine "
             "the actual knowledge of a student based on their submitted paper. Your goal is to come up with "
             "a list of questions, both on intuitive level and on deeper technical level that evaluate if "
             "a student really knows about his or her work. Focus on the knowledge of the main proposed method, "
@@ -326,40 +320,7 @@ class QAVerbalizer:
             "Be extremely specific and ask about details presented in the paper, no generic or abstract questions. "
         )
 
-        human_message = f"Below is the student arxiv paper about which the questions needs to be asked: {paper_text}"
-
-        messages = [{"role": "system", "content": system_message}, {"role": "user", "content": human_message}]
-
-        response = self.llm_api(
-            model=self.llm_base,
-            messages=messages,
-            temperature=0,
-            functions=[
-                {
-                    "name": "ask_questions",
-                    "description": "ask questions about provided arxiv paper",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "questions": {
-                                "type": "array",
-                                "description": "the list of questions to be asked",
-                                "items": {
-                                    "type": "string",
-                                    "description": "individual question, thoughtful and revealing",
-                                },
-                            },
-                        },
-                        "required": ["questions"],
-                    },
-                }
-            ],
-            function_call="auto",
-        )
-
-        Qs = json.loads(response.choices[0].message.function_call.arguments)
-
-        system_message = (
+        self.student_system_message = (
             "You are a student, who wrote this paper. You are on a very important exam. "
             "You are tasked to explain your work as best as you can. "
             "You will be provided with a text of the paper, split by pages and a question. "
@@ -371,8 +332,43 @@ class QAVerbalizer:
             "Make sure to answer using at least 10 (ten) sentences."
         )
 
-        answers = []
-        pages = []
+        self.question_schema = {
+            "name": "ask_questions",
+            "description": "ask questions about provided arxiv paper",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "description": "the list of questions to be asked",
+                        "items": {
+                            "type": "string",
+                            "description": "individual question, thoughtful and revealing",
+                        },
+                    },
+                },
+                "required": ["questions"],
+            },
+        }
+
+    def prepare_messages(self, paper_text):
+        # path = os.path.join(files_dir, "original_text_split_pages.txt")
+        # with open(path) as f:
+        #    paper_text = f.read()
+
+        human_message = f"Below is the student arxiv paper about which the questions needs to be asked: {paper_text}"
+
+        messages = [{"role": "system", "content": self.prof_system_message}, {"role": "user", "content": human_message}]
+
+        response = self.llm_api(
+            model=self.llm_strong,
+            messages=messages,
+            temperature=0,
+            functions=[self.question_schema],
+            function_call="auto",
+        )
+
+        Qs = json.loads(response.choices[0].message.function_call.arguments)
 
         for Q in Qs["questions"]:
             human_message = (
@@ -380,18 +376,24 @@ class QAVerbalizer:
                 "Make sure your answer best reflects the provided text."
             )
 
-            messages = [{"role": "system", "content": system_message}, {"role": "user", "content": human_message}]
+            messages = [
+                {"role": "system", "content": self.student_system_message},
+                {"role": "user", "content": human_message},
+            ]
+            yield Q, messages
 
-            for i in range(3):
-                try:
-                    response = self.llm_api(model=self.llm_base, messages=messages, temperature=0)
-                    break
-                except:
-                    time.sleep(5)
-            else:
-                raise Exception(f"{self.llm_base} failed")
+    def gpts(self, questions):
+        for messages in questions:
+            response = self.llm_api(model=self.llm_base, messages=messages, temperature=0)
+            yield response.choices[0].message.content
 
-            answer = response.choices[0].message.content
+    def process_answers(self, gpt_answers, paper_text) -> tuple[Any, list]:
+        answers = []
+        pages = []
+
+        for answer in gpt_answers:
+            # response = self.llm_api(model=self.llm_base, messages=messages, temperature=0)
+            # answer = response.choices[0].message.content
 
             answer = answer.replace("$", "").replace("```", "").replace("<<", "").replace(">>", "").replace("**", "")
 
@@ -407,7 +409,7 @@ class QAVerbalizer:
             # pages.append(np.argmax(counts))
             pages.append(seq)
 
-        return Qs["questions"], answers, pages
+        return answers, pages
 
 
 class DocumentProcessor:
@@ -669,7 +671,7 @@ class DocumentProcessor:
 
     def q_a_to_speech(self, text, is_question) -> str:
         voice = "Studio-Q" if is_question else "Studio-A"
-        chunk_audio_file_name = f"qa_{hash(text)}.mp3" if is_question else f"answer_{hash(text)}.mp3"
+        chunk_audio_file_name = f"question_{hash(text)}.mp3" if is_question else f"answer_{hash(text)}.mp3"
 
         audio_content, file_path = self.tts_client.synthesize_speech(
             text, voice, 1.0, self.files_dir, chunk_audio_file_name
@@ -692,7 +694,7 @@ class DocumentProcessor:
             qa_pairs = chain.from_iterable(self.extract_q_a(q, a) for q, a in zip(questions, answers))
             print(qa_pairs)
             for file_name in starmap(self.q_a_to_speech, qa_pairs):
-                mp3_list_file.write(f"file '{file_name}'\n")
+                mp3_list_file.write(f"file {file_name}\n")
 
         final_audio_qa = os.path.join(self.files_dir, f"{self.args.final_audio_file}_qa.mp3")
         os.system(f"{self.args.ffmpeg} -f concat -i {qa_mp3_list_file} " f"-c copy {final_audio_qa}")
@@ -1042,5 +1044,26 @@ def test():
     # pprint(gptpagemap)
     # pprint(textpagemap)
 
+
+def test_qa():
+    with open(".temp/1706.03762_files/original_text_split_pages.txt") as f:
+        paper_text = f.read()
+
+    p = DocumentProcessor(args)
+    p.files_dir = ".temp/debug"
+    qa_verbalizer = QAVerbalizer(args, Matcher(args.cache_dir), logging)
+    messages = list(qa_verbalizer.prepare_messages(paper_text))
+    questions = [q for q, _ in messages]
+    gpts = [m for _, m in messages]
+    answers = list(qa_verbalizer.gpts(gpts[:1]))
+    answers, pages = qa_verbalizer.process_answers(answers[:1], paper_text)
+
+    pprint(questions[:1])
+    pprint(answers)
+
+    p.process_qa_speech(questions[:1], answers[:1], "title")
+
+
+# test_qa()
 
 # test()
