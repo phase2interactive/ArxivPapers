@@ -146,14 +146,14 @@ class Verbalizer:
         curr = ""
         page_inds = []
         for i_s, sec in enumerate(sections):
-
+            tokens = sent_tokenize(sec)
             # if there is a mismatch, do this hack to make them of equal length
-            if len(sent_tokenize(sec)) != len(pagemap_sections[i_s]):
-                minN = min(len(sent_tokenize(sec)), len(pagemap_sections[i_s]))
-                cleaned_sent_tok = sent_tokenize(sec)[:minN]
+            if len(tokens) != len(pagemap_sections[i_s]):
+                minN = min(len(tokens), len(pagemap_sections[i_s]))
+                cleaned_sent_tok = tokens[:minN]
                 cleaned_pmap_sec = pagemap_sections[i_s][:minN]
             else:
-                cleaned_sent_tok = sent_tokenize(sec)
+                cleaned_sent_tok = tokens
                 cleaned_pmap_sec = pagemap_sections[i_s]
 
             page_inds += cleaned_pmap_sec
@@ -227,6 +227,8 @@ class Verbalizer:
             gpttext_all += "".join([v[1] for _, v in response_by_type.items()])
             gptpagemap += gptpagemap_section + smry_fakepagemap_section
             textpagemap += textpagemap_section + [-1]
+
+            print(f"Original text pages: \n {page_inds} \n GPT text pages: \n {gptpagemap_section} \n")
 
             verbalizer_steps.append([" ".join(curr_upd), gpttext])
 
@@ -1010,19 +1012,23 @@ def test():
     with open(".temp/1706.03762_files/map_pageblockmap.pkl", "rb") as f:
         pageblockmap = pickle.load(f)
 
+    pprint(pageblockmap)
+
+    return
     # with open(".temp/test_process_sections.pkl", "rb") as f:
     #   results = pickle.load(f)
 
     import logging
     from map.utils import Matcher
-    from pprint import pprint
-    from itertools import groupby
-    from operator import itemgetter
 
     verbalizer = Verbalizer(args, Matcher(args.cache_dir), logging)
     verbalizer.llm_strong = "gpt-3.5-turbo-0125"
     verbalizer.llm_base = "gpt-3.5-turbo-0125"
     verbalizer.llm_api = mock_llm_api
+
+    pprint(text)
+    pprint(pageblockmap)
+
     message_batches = list(verbalizer.generate_messages(text, pageblockmap))
     # pprint(message_batches)
 
@@ -1030,10 +1036,9 @@ def test():
 
     gpttext, gptpagemap, verbalizer_steps, textpagemap = verbalizer.process_results(gpt_responses)
 
-    # pprint(gptpagemap)
+    pprint(textpagemap)
     pprint(gptpagemap)
     print(len(gptpagemap))
-
     print(len(sent_tokenize(gpttext)))
 
     # results = [verbalizer.process_section(sec, pagemap_sections[i]) for i, sec in enumerate(sections)]
