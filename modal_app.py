@@ -2,6 +2,7 @@ import os
 import argparse
 from modal import App, Image, Volume, NetworkFileSystem, Mount, Secret, enter, method, build, web_endpoint
 from sympy import im
+from collections import defaultdict
 
 # from main import main as main_func
 from makevideo_parallel import process_line, process_short_line, process_qa_line, prepare_qa_tasks, CommandRunner
@@ -27,6 +28,11 @@ from datetime import datetime
 volume = Volume.from_name("arxiv-volume", create_if_missing=True)
 VOLUME_PATH = "/root/shared"
 
+
+def get_matcher():
+    return Matcher("cache")
+
+
 def builder():
     import nltk
 
@@ -36,6 +42,8 @@ def builder():
     from spacy.cli import download
 
     download("en_core_web_lg")
+
+    _ = get_matcher()
 
 
 app = App("arxiv")
@@ -67,7 +75,7 @@ app_image = (
 )
 
 
-def latex(args: argparse.Namespace):
+def latex(args: argparse.Namespace) -> tuple[str, str, list[str]]:
     remove_oldfiles_samepaper(args.paperid)
     files_dir = download_paper(args.paperid)
 
@@ -82,6 +90,46 @@ def latex(args: argparse.Namespace):
         raise Exception("No main source file found")
 
     return main_file, files_dir, tex_files
+
+
+def unpack_pdf(lines: list[str], dr: str, main_pdf_file: str) -> list:
+    pages = defaultdict(list)
+    for line in lines:
+        line = line.strip()
+        components = line.split()
+        match = re.search(r"page(\d+)", components[1])
+        page_num = int(match.group(1))
+        pages[page_num].append(line)
+
+    # extract each page of the pdf used by downstream functions
+    pdfs = []
+    for page_num, _ in pages.items():
+        page_num_pdf = f"{os.path.join(dr, str(page_num))}.pdf"
+
+        ret = os.system(
+            f"gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={page_num + 1} -dLastPage={page_num + 1} -sOutputFile={page_num_pdf} {main_pdf_file} > /dev/null 2>&1"
+        )
+        if ret != 0:
+            raise Exception(f"Error extracting page {page_num} Return code: {ret}")
+        # run.extract_page_as_pdf(main_pdf_file, page_num + 1, page_num_pdf)
+        pdfs.append(page_num_pdf)
+    return pdfs
+
+
+def walk_zip(dir, zip_path) -> list:
+    files = []
+    with zipfile.ZipFile(zip_path, "w") as zipf:
+        for dirpath, _, filenames in os.walk(dir):
+            for filename in filenames:
+                # check for the zip path being in the dir to avoid recursion
+                if filename == os.path.basename(zip_path):
+                    continue
+                file_path = os.path.join(dirpath, filename)
+                print(file_path)
+                zipf.write(file_path)
+                files.append(file_path)
+
+    return files
 
 
 @app.cls(
@@ -99,7 +147,7 @@ class ArxivVideo:
 
         # get a unique value based on the current time
         self.run_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
-        # self.run_id = "20240501011049715413"
+        self.run_id = "20240501011049715413"
 
         # self.extracted_path = "/root/shared/20240501011049715413/extracted/1706.03762/output"
         print(f"run_id: {self.run_id}")
@@ -116,6 +164,8 @@ class ArxivVideo:
         from spacy.cli import download
 
         download("en_core_web_lg")
+
+        _ = Matcher("cache")
 
     def inititalize_directory(self, args, target_dir=".temp"):
         import zipfile
@@ -157,30 +207,10 @@ class ArxivVideo:
 
         # lines = [line for line in lines if "page0" in line]
         # print(lines)
+        main_pdf_file = os.path.join(dr, "main.pdf")
 
-        # Group lines by page number
-        pages = defaultdict(list)
-        for line in lines:
-            line = line.strip()
-            components = line.split()
-            match = re.search(r"page(\d+)", components[1])
-            page_num = int(match.group(1))
-            pages[page_num].append(line)
-
-        # output each page of the pdf this is used by downstream functions
-        print(pages)
-        pdfs = []
-        for page_num, _ in pages.items():
-            page_num_pdf = f"{os.path.join(dr, str(page_num))}.pdf"
-            logfile_path = os.path.join(dr, "logs", f"pdf.log")
-            main_pdf_file = os.path.join(dr, "main.pdf")
-
-            with CommandRunner(logfile_path, args) as run:
-                os.system(
-                    f"gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={page_num + 1} -dLastPage={page_num + 1} -sOutputFile={page_num_pdf} {main_pdf_file} > /dev/null 2>&1"
-                )
-                # run.extract_page_as_pdf(main_pdf_file, page_num + 1, page_num_pdf)
-                pdfs.append(page_num_pdf)
+        # todo: move this to ZIP
+        pdfs = unpack_pdf(lines, dr, main_pdf_file)
 
         return dr, lines, pdfs, file_paths
 
@@ -255,13 +285,36 @@ class ArxivVideo:
         return audio, chunk_audio_file_name, text
 
     @method()
+    def q_a_to_speech(self, text, is_question) -> str:
+        processor = DocumentProcessor(self.args)
+        voice = "Studio-Q" if is_question else "Studio-A"
+        chunk_audio_file_name = f"question_{hash(text)}.mp3" if is_question else f"answer_{hash(text)}.mp3"
+
+        files_dir = "."
+        audio_content, file_path = processor.tts_client.synthesize_speech(
+            text, voice, 1.0, files_dir, chunk_audio_file_name
+        )
+
+        if is_question:
+            chunk_audio_with_silence = os.path.join(files_dir, f"with_silence_{hash(text)}.mp3")
+            os.system(
+                f'{self.args.ffmpeg} -i {file_path} -f lavfi -t 2 -i anullsrc=r=44100:cl=stereo -filter_complex "[0:a][1:a]concat=n=2:v=0:a=1" {chunk_audio_with_silence}'
+            )
+            shutil.move(chunk_audio_with_silence, file_path)
+
+            with open(file_path, "rb") as f:
+                audio_content = f.read()
+
+        return audio_content, chunk_audio_file_name, text, is_question
+
+    @method()
     def verbalize_section(self, sec, pagemap_section):
-        verbalizer = Verbalizer(self.args, Matcher(self.args.cache_dir), logging)
+        verbalizer = Verbalizer(self.args, get_matcher(), logging)
         return verbalizer.process_section(sec, pagemap_section)
 
     @method()
     def get_gpt_text(self, i, message_batch, model: str, message_type: str) -> tuple[Any, str, str]:
-        verbalizer = Verbalizer(self.args, Matcher(self.args.cache_dir), logging)
+        verbalizer = Verbalizer(self.args, get_matcher(), logging)
         gpt_text, _, _ = verbalizer.get_gpt_text(message_batch, model)
         return i, gpt_text, message_type
 
@@ -270,8 +323,8 @@ class ArxivVideo:
         args = self.args
 
         checkpoint = str(Path(VOLUME_PATH) / Path(self.run_id) / Path("checkpoint"))
-
-        if os.path.exists(checkpoint):
+        checkpoint_zip = checkpoint + "/checkpoint.zip"
+        if os.path.exists(checkpoint_zip):
             print("restoring from checkpoint: ", checkpoint)
             with open(os.path.join(checkpoint, "pageblockmap.pkl"), "rb") as f:
                 pageblockmap = pickle.load(f)
@@ -285,7 +338,9 @@ class ArxivVideo:
                 text = state["text"]
                 abstract = state["abstract"]
 
-            shutil.copytree(checkpoint, files_dir)
+            with zipfile.ZipFile(checkpoint_zip, "r") as zipf:
+                zipf.extractall(".")
+
             processor.files_dir = files_dir
             list_files(files_dir)
             print("files restored")
@@ -300,9 +355,15 @@ class ArxivVideo:
             print(" ==== MAP ================================================")
             _, pageblockmap = self.process_map(main_file, files_dir, text)
 
-            # os.makedirs(checkpoint, exist_ok=True)
+            # zip all files in all directories under files_dir
+            print(" ==== CHECKPOINT =========================================")
 
-            shutil.copytree(files_dir, checkpoint)
+            zip_path = os.path.join(files_dir, "checkpoint.zip")
+
+            walk_zip(files_dir, zip_path)
+
+            os.makedirs(checkpoint, exist_ok=True)
+            shutil.copy(zip_path, checkpoint)
 
             with open(os.path.join(checkpoint, "pageblockmap.pkl"), "wb") as f:
                 pickle.dump(pageblockmap, f)
@@ -327,7 +388,7 @@ class ArxivVideo:
             @try_decorator
             def create_video() -> dict[str, Any]:
                 print(" ==== create_video ==============================================")
-                verbalizer = Verbalizer(args, Matcher(args.cache_dir), logging)
+                verbalizer = Verbalizer(args, get_matcher(), logging)
 
                 # generate requests for llm
                 message_batches = list(verbalizer.generate_messages(text, pageblockmap))
@@ -434,7 +495,7 @@ class ArxivVideo:
                 with open(os.path.join(processor.files_dir, "original_text_split_pages.txt")) as f:
                     paper_text = f.read()
 
-                verbalizer = QAVerbalizer(args, Matcher(args.cache_dir), logging)
+                verbalizer = QAVerbalizer(args, get_matcher(), logging)
                 messages = list(verbalizer.prepare_messages(paper_text))
 
                 questions = [q for q, _ in messages]
@@ -458,7 +519,33 @@ class ArxivVideo:
                         f.write(a)
                         f.write("\n\n")
 
-                processor.process_qa_speech(questions, answers, title)
+                qa_mp3_list_file = os.path.join(processor.files_dir, f"qa_{self.args.chunk_mp3_file_list}")
+                with open(qa_mp3_list_file, "w") as mp3_list_file:
+                    star_args = [
+                        (text, is_question)
+                        for q, a in zip(questions, answers)
+                        for text, is_question in processor.extract_q_a(q, a)
+                    ]
+                    print(star_args)
+
+                    results = self.q_a_to_speech.starmap(star_args)
+
+                    for audio, file_name, _, _ in results:
+                        mp3_file = os.path.join(processor.files_dir, os.path.basename(file_name))
+                        with open(mp3_file, "wb") as f:
+                            f.write(audio)
+                        print("wrote ", mp3_file)
+                        mp3_list_file.write(f"file {file_name}\n")
+
+                final_audio_qa = os.path.join(processor.files_dir, f"{self.args.final_audio_file}_qa.mp3")
+                os.system(f"{self.args.ffmpeg} -f concat -i {qa_mp3_list_file} " f"-c copy {final_audio_qa}")
+
+                logging.info("Created QA audio file")
+
+                if self.args.gdrive_id:
+                    self.gdrive_client.upload_audio(f"[QA] {title}", f"{final_audio_qa}")
+                    logging.info("Uploaded QA audio to GDrive")
+
                 return {"gpttext_q": questions, "gpttext_a": answers, "qa_pages": qa_pages}
 
             @try_decorator
@@ -516,7 +603,7 @@ class ArxivVideo:
         if not self.args.create_video:
             return None, None
 
-        matcher = Matcher(self.args.cache_dir)
+        matcher = get_matcher()
 
         logging.info("Mapping text to pages")
         pdf_file = f"{os.path.join(files_dir, main_file)}.pdf"
@@ -529,10 +616,19 @@ class ArxivVideo:
         pageblockmap = []
         coords = []
 
-        with open(pdf_file, "rb") as f:
-            pdf_bytes = f.read()
+        # move the pdf to the shared volume so process_page containers can access it
+        volume_file = os.path.join(VOLUME_PATH, self.run_id, "main.pdf")
+        os.makedirs(os.path.join(VOLUME_PATH, self.run_id), exist_ok=True)
+        shutil.copy(pdf_file, volume_file)
+        volume.commit()
 
-        star_args = [(i, pg_num, pagemap, splits, matcher, pdf_bytes) for i, pg_num in enumerate(np.unique(pagemap))]
+        star_args = []
+        for i, pg_num in enumerate(np.unique(pagemap)):
+            np_array = np.array(pagemap)
+            start = np.where(np_array == pg_num)[0][0]
+            end = np.where(np_array == pg_num)[0][-1] + 1
+            page_text_splits = splits[start:end]
+            star_args.append((i, pg_num, page_text_splits, volume_file))
 
         results = list(self.process_page.starmap(star_args))
         results.sort(key=lambda x: x[0])
@@ -570,21 +666,23 @@ class ArxivVideo:
         return pagemap, pageblockmap
 
     @method()
-    def process_page(self, i, pg_num, pagemap, splits, matcher, pdf_bytes) -> list[int]:
+    def process_page(self, i, pg_num, page_text_splits, pdf_file) -> list[int]:
+        matcher = get_matcher()
+        print(pdf_file, os.path.exists(pdf_file))
+
         print("------ process_page", i, pg_num)
         files_dir = f".temp/{self.args.paperid}_files"
-        pdf_file = os.path.join(files_dir, "main.pdf")
         os.makedirs(files_dir, exist_ok=True)
-
-        with open(pdf_file, "wb") as f:
-            f.write(pdf_bytes)
 
         page_pdf = f"{os.path.join(files_dir, str(pg_num))}.pdf"
         page_png = f"{os.path.join(files_dir, str(pg_num))}.png"
 
-        os.system(
+        ret = os.system(
             f"{self.args.gs} -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={pg_num + 1} -dLastPage={pg_num + 1} -sOutputFile={page_pdf} {pdf_file} > /dev/null 2>&1"
         )
+
+        if ret != 0:
+            raise Exception("Error extracting page")
 
         doc = fitz.open(page_pdf)
         page = doc[0]
@@ -596,10 +694,6 @@ class ArxivVideo:
             if len(b[4]) > 0:
                 good_blocks.append(b[4])
                 good_coords.append(list(b[:4]))
-
-        start = np.where(np.array(pagemap) == pg_num)[0][0]
-        end = np.where(np.array(pagemap) == pg_num)[0][-1] + 1
-        page_text_splits = splits[start:end]
 
         seq = matcher.match(
             page_text_splits,
@@ -619,23 +713,23 @@ class ArxivVideo:
 
     @method()
     def process_line_f(self, i, line) -> tuple[int, str, bytes, Exception]:
+        print("process_line_f", i, line)
 
         block_coords = pickle.load(open(os.path.join(self.dr, "block_coords.pkl"), "rb"))
         gptpagemap = pickle.load(open(os.path.join(self.dr, "gptpagemap.pkl"), "rb"))
 
-        i, mp4_file, ex = process_line(i, line, self.dr, self.video_args, block_coords, gptpagemap)
+        _, mp4_file, ex = process_line(i, line, self.dr, self.video_args, block_coords, gptpagemap)
 
         data = b""
         with open(mp4_file, "rb") as f:
             for chunk in f:
                 data += chunk
-            # volume.write_file(os.path.join(dr, mp4_file), f)
 
         return i, mp4_file, data, ex
 
     @method()
     def process_short_line_f(self, i, line, page_num) -> tuple[int, str, bytes, None]:
-        i, mp4_file, _, ex = process_short_line(i, line, page_num, self.dr, self.video_args)
+        _, mp4_file, _, ex = process_short_line(i, line, page_num, self.dr, self.video_args)
 
         if ex:
             raise ex
@@ -644,25 +738,24 @@ class ArxivVideo:
             with open(mp4_file, "rb") as f:
                 for chunk in f:
                     data += chunk
-                # volume.write_file(os.path.join(dr, mp4_file), f)
 
             return i, mp4_file, data, ex
 
     @method()
     def process_qa_line_f(self, line, line_num, input_path, dr, args) -> tuple[int, str, bytes, Exception]:
-        i, mp4_file, _, ex = process_qa_line(line, line_num, input_path, self.dr, self.video_args)
-        print(i, mp4_file, ex)
+        print(line_num, mp4_file, ex)
+        _, mp4_file, _, ex = process_qa_line(line, line_num, input_path, self.dr, self.video_args)
 
         data = b""
         with open(mp4_file, "rb") as f:
             for chunk in f:
                 data += chunk
-            # volume.write_file(os.path.join(dr, mp4_file), f)
 
-        return i, mp4_file, data, ex
+        return line_num, mp4_file, data, ex
 
     @method()
     def makevideo(self, video_type: str):
+        pprint(self.lines)
         if video_type == "long":
             results = list(
                 self.process_line_f.starmap(
@@ -671,17 +764,11 @@ class ArxivVideo:
                 )
             )
 
-            if any([isinstance(result, Exception) for result in results]):
-                raise Exception("Error occurred")
-
-            results.sort(key=lambda x: x[0])
-
         elif video_type == "short" and "short_mp3s" in self.file_paths:
             with open(self.file_paths["short_mp3s"], "r") as f:
                 lines = f.readlines()
 
             results = list(self.process_short_line_f.starmap([(i, line, i) for i, line in enumerate(lines)]))
-            results.sort(key=lambda x: x[0])
 
         elif video_type == "qa" and "qa_mp3_list" in self.file_paths:
             with open(self.file_paths["qa_mp3_list"], "r") as f:
@@ -692,7 +779,8 @@ class ArxivVideo:
             qa_pages = pickle.load(open(os.path.join(self.dr, "qa_pages.pkl"), "rb"))
             tasks = prepare_qa_tasks(self.dr, lines, qa_pages, self.video_args)
             results = list(self.process_qa_line_f.starmap(tasks))
-            results.sort(key=lambda x: x[0])
+
+        results.sort(key=lambda x: x[0])
 
         mp4_list = Path(self.dr) / "mp4_list.txt"
         with open(mp4_list, "w") as mp4f:
@@ -701,18 +789,25 @@ class ArxivVideo:
                     logging.error(f"Error occurred: {ex}")
                     return
                 else:
-                    # data = b""
-                    # for chunk in volume.read_file(mp4_file):
-                    #     data += chunk
                     with open(mp4_file, "wb") as f:
                         f.write(data)
                     print(mp4_file)
                     mp4f.write(f"file {os.path.basename(mp4_file)}\n")
         import subprocess
 
-        command, mp4_output = self.create_video_command(self.args, mp4_list, f"output_{video_type}.mp4")
+        command, mp4_output = self.create_video_command(self.args, mp4_list, Path(self.dr) / f"output_{video_type}.mp4")
         print(command)
         proc_result = subprocess.run(command, shell=True)
+
+        # walk_zip(self.dr, f"{self.args.paperid}_long_video.zip")
+
+        # shutil.copy(
+        #     f"{self.args.paperid}_long_video.zip",
+        #     f"{VOLUME_PATH}/{self.args.paperid}_long_video.zip",
+        # )
+
+        # volume.commit()
+
         # proc_result = os.system(command)
         if proc_result.returncode == 0:
             with open(mp4_output, "rb") as f:
@@ -822,9 +917,16 @@ def main():
 
     arx = ArxivVideo(args, video_args)
 
-    images, zip = arx.make_video.remote(paperid, ["long", "short", "qa"])
+    # images, zip = arx.run_zip.remote(paperid, ["long", "short", "qa"])
 
-    # images, zip = arx.make_video.remote(paperid, ["short"])
+    images, zip = arx.make_video.remote(
+        paperid,
+        [
+            "long",
+            # "short",
+            # "qa",
+        ],
+    )
 
     if not zip:
         return
@@ -867,7 +969,7 @@ def test():
         extract_text_only=False,
         create_video=True,
         create_short=True,
-        create_qa=False,
+        create_qa=True,
         create_audio_simple=False,
         llm_strong="gpt-4-0125-preview",
         llm_base="gpt-4-0125-preview",
@@ -924,5 +1026,33 @@ def test2():
     print(len(gptpagemap))
     print(len(sent_tokenize(gpttext)))
 
+
+def img_test():
+
+    dr = "/workspaces/ArxivPapers/.temp/1706.03762"
+    video_args = argparse.Namespace(paperid="1706.03762", gs="gs", ffmpeg="ffmpeg", ffprobe="ffprobe")
+    block_coords = pickle.load(
+        open("/workspaces/ArxivPapers/.temp/debug/long_video/.temp/1706.03762/output/block_coords.pkl", "rb")
+    )
+    gptpagemap = pickle.load(
+        open("/workspaces/ArxivPapers/.temp/debug/long_video/.temp/1706.03762/output/gptpagemap.pkl", "rb")
+    )
+
+    with open("/workspaces/ArxivPapers/.temp/debug/long_video/.temp/1706.03762/output/mp3_list.txt", "r") as f:
+        lines = f.readlines()
+
+    for i, line in enumerate(lines):
+
+        process_line(
+            i,
+            line,
+            "/workspaces/ArxivPapers/.temp/debug/long_video/.temp/1706.03762/output/",
+            video_args,
+            block_coords,
+            gptpagemap,
+        )
+
+
 # test()
 # test2()
+# img_test()

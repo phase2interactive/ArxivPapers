@@ -85,20 +85,23 @@ class VerbalizerShort:
     def process_files(self, files, slides_short) -> str:
         print(" --- process_files --- ")
         short_mp3_list_file = os.path.join(self.files_dir, f"shorts_{self.args.chunk_mp3_file_list}")
-        with open(short_mp3_list_file, "w") as mp3_list_file:
-            for bytes, chunk_audio, _ in files:
-                local_mp3 = os.path.join(self.files_dir, os.path.basename(chunk_audio))
+        final_audio_short = os.path.join(self.files_dir, f"{self.args.final_audio_file}_short.mp3")
 
-                if not os.path.exists(local_mp3):
-                    with open(os.path.join(self.files_dir, os.path.basename(chunk_audio)), "wb") as f:
-                        f.write(bytes)
+        with open(short_mp3_list_file, "w") as mp3_list_file:
+            for audio_bytes, chunk_audio, _ in files:
+                local_mp3 = os.path.join(self.files_dir, os.path.basename(chunk_audio))
+                with open(local_mp3, "wb") as f:
+                    written = f.write(audio_bytes)
+                    print(f"Wrote {written} bytes to {local_mp3}")
 
                 mp3_list_file.write(f"file {os.path.basename(chunk_audio) }\n")
 
-            final_audio_short = os.path.join(self.files_dir, f"{self.args.final_audio_file}_short.mp3")
-            os.system(f"{self.args.ffmpeg} -f concat -i {short_mp3_list_file} " f"-c copy {final_audio_short}")
-
-            self.logging.info("Created short audio file")
+        ret_val = os.system(f"{self.args.ffmpeg} -f concat -i {short_mp3_list_file} -c copy {final_audio_short}")
+        if ret_val != 0:
+            logging.error(f"ffmpeg error:  {ret_val}")
+            raise Exception("ffmpeg error")
+        else:
+            logging.info("Created short audio file")
 
         create_slides(slides_short, os.path.join(self.files_dir, "slides"))
 
