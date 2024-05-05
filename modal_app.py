@@ -147,9 +147,8 @@ class ArxivVideo:
 
         # get a unique value based on the current time
         self.run_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
-        self.run_id = "20240501011049715413"
+        # self.run_id = "20240505194839160708"
 
-        # self.extracted_path = "/root/shared/20240501011049715413/extracted/1706.03762/output"
         print(f"run_id: {self.run_id}")
         if args.gdrive_id:
             self.gdrive_client = GDrive(args.gdrive_id)
@@ -228,7 +227,7 @@ class ArxivVideo:
     def download_and_zip(self, paperid: str):
         import shutil
         volume_path = f"{VOLUME_PATH}/{paperid}/{paperid}.zip"
-        zip_file = self.get_zip()
+        zip_file, abstract, title = self.get_zip()
 
         # copy zip_file to shared volume
         os.makedirs(os.path.dirname(volume_path), exist_ok=True)
@@ -236,7 +235,7 @@ class ArxivVideo:
 
         volume.commit()
 
-        return volume_path
+        return volume_path, abstract, title
 
     def get_speech_blocks_for_video(self, text, pageblockmap):
         splits = sent_tokenize(text)
@@ -318,7 +317,7 @@ class ArxivVideo:
         gpt_text, _, _ = verbalizer.get_gpt_text(message_batch, model)
         return i, gpt_text, message_type
 
-    def get_zip(self):
+    def get_zip(self) -> tuple[str, Any | str, Any | str]:
         processor = DocumentProcessor(self.args)
         args = self.args
 
@@ -526,7 +525,6 @@ class ArxivVideo:
                         for q, a in zip(questions, answers)
                         for text, is_question in processor.extract_q_a(q, a)
                     ]
-                    print(star_args)
 
                     results = self.q_a_to_speech.starmap(star_args)
 
@@ -597,7 +595,7 @@ class ArxivVideo:
             processor.gdrive_client.upload_audio(title, f"{final_audio}")
             processor.logging.info("Uploaded audio to GDrive")
 
-        return processor.process_zip(main_file)
+        return processor.process_zip(main_file), abstract, title
 
     def process_map(self, main_file, files_dir, text) -> tuple[None, None] | tuple[list[int], list]:
         if not self.args.create_video:
@@ -731,15 +729,12 @@ class ArxivVideo:
     def process_short_line_f(self, i, line, page_num) -> tuple[int, str, bytes, None]:
         _, mp4_file, _, ex = process_short_line(i, line, page_num, self.dr, self.video_args)
 
-        if ex:
-            raise ex
-        else:
-            data = b""
-            with open(mp4_file, "rb") as f:
-                for chunk in f:
-                    data += chunk
+        data = b""
+        with open(mp4_file, "rb") as f:
+            for chunk in f:
+                data += chunk
 
-            return i, mp4_file, data, ex
+        return i, mp4_file, data, ex
 
     @method()
     def process_qa_line_f(self, line, line_num, input_path, dr, args) -> tuple[int, str, bytes, Exception]:
@@ -821,9 +816,12 @@ class ArxivVideo:
 
     @method()
     def run_zip(self, paperid, video_types=["long"]) -> tuple[dict[str, bytes], bytes]:
-        zip_file = self.download_and_zip.remote(paperid)
+        zip_file, abstract, title = self.download_and_zip.remote(paperid)
+        print(title)
+        print(abstract)
         volume.reload()
-        zip_data = open(zip_file, "rb").read()
+        with open(zip_file, "rb") as f:
+            zip_data = f.read()
 
         videos = {}
 
@@ -832,14 +830,13 @@ class ArxivVideo:
 
     @method()
     def run(self, paperid, video_types=["long"]) -> tuple[dict[str, bytes], bytes]:
-
-        zip_file = self.download_and_zip.remote(paperid)
+        zip_file, abstract, title = self.download_and_zip.remote(paperid)
+        print(title)
+        print(abstract)
         volume.reload()
+        with open(zip_file, "rb") as f:
+            zip_data = f.read()
 
-        # self.extracted_path = os.path.join(VOLUME_PATH, self.run_id, "extracted")
-        # self.inititalize_directory(self.args, target_dir=self.extracted_path)
-
-        zip_data = open(zip_file, "rb").read()
         results = list(self.makevideo.map(video_types))
 
         videos = {}
@@ -847,7 +844,7 @@ class ArxivVideo:
             videos[video_type] = data
 
         # volume.delete_file(zip_file)
-        return videos, zip_data
+        return videos, zip_data, abstract, title
 
     @method()
     def make_video(self, paperid, video_types=["long"]) -> tuple[dict[str, bytes], bytes]:
@@ -884,6 +881,11 @@ class ArxivVideo:
 def main():
 
     paperid = "1706.03762"
+    video_types = [
+        "long",
+        # "short",
+        # "qa",
+    ]
 
     args = argparse.Namespace(
         paperid=paperid,
@@ -903,11 +905,11 @@ def main():
         manual_gpt=False,
         include_summary=True,
         extract_text_only=False,
-        create_video=True,
-        create_short=True,
-        create_qa=True,
+        create_video="long" in video_types,
+        create_short="short" in video_types,
+        create_qa="qa" in video_types,
         create_audio_simple=False,
-        llm_strong="gpt-3.5-turbo-0125",
+        llm_strong="gpt-4-0125-preview",
         llm_base="gpt-3.5-turbo-0125",  # "gpt-4-0125-preview",
         openai_key=os.environ.get("OPENAI_API_KEY", ""),
         tts_client="openai",
@@ -917,16 +919,12 @@ def main():
 
     arx = ArxivVideo(args, video_args)
 
-    # images, zip = arx.run_zip.remote(paperid, ["long", "short", "qa"])
+    # images, zip, abstract, title = arx.run.remote(paperid, video_types)
+    # print(title)
+    # print(abstract)
+    images, zip = arx.run_zip.remote(paperid, video_types)
 
-    images, zip = arx.make_video.remote(
-        paperid,
-        [
-            "long",
-            # "short",
-            # "qa",
-        ],
-    )
+    # images, zip = arx.make_video.remote(paperid, video_types)
 
     if not zip:
         return
@@ -947,7 +945,7 @@ def main():
             print(f"Saved {mp4_file}")
 
 
-def test():
+def test_args():
     paperid = "1706.03762"
     args = argparse.Namespace(
         paperid=paperid,
@@ -976,18 +974,22 @@ def test():
         openai_key=os.environ.get("OPENAI_API_KEY", ""),
         tts_client="openai",
     )
+    return args
 
+
+def test():
+    args = test_args()
     v = VerbalizerShort(args, ".temp", logging)
     print(v.files_dir)
 
-    video_args = argparse.Namespace(paperid=paperid, gs="gs", ffmpeg="ffmpeg", ffprobe="ffprobe")
+    video_args = argparse.Namespace(paperid=args.paperid, gs="gs", ffmpeg="ffmpeg", ffprobe="ffprobe")
 
     ax = ArxivVideo(args, video_args)
 
-    with open(f".temp/{paperid}_files/gpt_text.txt", "r") as f:
+    with open(f".temp/{args.paperid}_files/gpt_text.txt", "r") as f:
         tx = f.read()
 
-    with open(f".temp/{paperid}_files/gptpagemap.pkl", "rb") as f:
+    with open(f".temp/{args.paperid}_files/gptpagemap.pkl", "rb") as f:
         pagemap = pickle.load(f)
 
     speech = list(ax.get_speech_blocks_for_video(tx, pagemap))
@@ -1021,8 +1023,8 @@ def test2():
         logging,
     )
 
+    pprint(textpagemap)
     pprint(gptpagemap)
-    # pprint(textpagemap)
     print(len(gptpagemap))
     print(len(sent_tokenize(gpttext)))
 
@@ -1053,6 +1055,37 @@ def img_test():
         )
 
 
+def restore():
+    checkpoint_zip = "/workspaces/ArxivPapers/checkpoint.zip"
+    if os.path.exists(checkpoint_zip):
+        with open("/workspaces/ArxivPapers/pageblockmap.pkl", "rb") as f:
+            pageblockmap = pickle.load(f)
+
+        with open("/workspaces/ArxivPapers/state.pkl", "rb") as f:
+            state = pickle.load(f)
+
+            main_file = state["main_file"]
+            files_dir = state["files_dir"]
+            title = state["title"]
+            text = state["text"]
+            abstract = state["abstract"]
+
+        with zipfile.ZipFile(checkpoint_zip, "r") as zipf:
+            zipf.extractall(".")
+        processor = DocumentProcessor(test_args())
+        processor.files_dir = files_dir
+
+        pprint(pageblockmap)
+
+        with open(".temp/1706.03762_files/map_pageblockmap.pkl", "rb") as f:
+            pageblockmap2 = pickle.load(f)
+
+        pprint(pageblockmap2)
+
+        assert pageblockmap == pageblockmap2
+
+
+# restore()
 # test()
 # test2()
 # img_test()
