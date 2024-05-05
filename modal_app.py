@@ -743,7 +743,7 @@ class ArxivVideo:
 
     @method()
     def process_qa_line_f(self, line, line_num, input_path, dr, args) -> tuple[int, str, bytes, Exception]:
-        print(line_num, mp4_file, ex)
+        print("process_qa_line_f", line_num, line)
         _, mp4_file, _, ex = process_qa_line(line, line_num, input_path, self.dr, self.video_args)
 
         data = b""
